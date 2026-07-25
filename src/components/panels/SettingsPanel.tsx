@@ -31,13 +31,12 @@ export default function SettingsPanel() {
     gridVisible, setGridVisible,
     snapToGrid, setSnapToGrid,
     showUniverseColors, setShowUniverseColors,
+    showScaleBar, setShowScaleBar,
     autoAddress, setAutoAddress,
     gridSize, project,
     setBackgroundImage, updateBackgroundImage,
   } = useProjectStore()
 
-  // gridSize setter may not exist — use updateElement workaround via store if needed
-  // For now read it and show info
   const bg = project?.backgroundImage
 
   const handleBgImage = async () => {
@@ -64,6 +63,9 @@ export default function SettingsPanel() {
           </Row>
           <Row label='Snap to grid'>
             <Toggle on={snapToGrid} onClick={() => setSnapToGrid(!snapToGrid)} />
+          </Row>
+          <Row label='Scale bar'>
+            <Toggle on={showScaleBar} onClick={() => setShowScaleBar(!showScaleBar)} />
           </Row>
           <Row label={`Grid size (${gridSize}m)`}>
             <div className='flex gap-1'>

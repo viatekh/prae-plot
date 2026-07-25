@@ -157,6 +157,7 @@ export interface CableElement extends BaseElement {
   endConnectedTo?: string
   annotation?: string       // free-text printed alongside length on plot
   autoLabel?: string        // auto-assigned "C1", "C2" etc.
+  manualLength?: number     // override drawn length (m) — for unscaled plots
 }
 
 export type AnyElement = RectElement | EllipseElement | PolygonElement | TrussElement | TextElement | CableElement

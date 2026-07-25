@@ -326,11 +326,12 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
       { x: ce.x2, y: ce.y2 },
     ]
     const konvaPts = allPts.flatMap((p) => [p.x * BASE_PX, p.y * BASE_PX])
-    // Total length — sum of segment distances
-    let length = 0
+    // Total length — manual override or sum of segment distances
+    let drawnLength = 0
     for (let i = 1; i < allPts.length; i++) {
-      length += Math.sqrt((allPts[i].x - allPts[i - 1].x) ** 2 + (allPts[i].y - allPts[i - 1].y) ** 2)
+      drawnLength += Math.sqrt((allPts[i].x - allPts[i - 1].x) ** 2 + (allPts[i].y - allPts[i - 1].y) ** 2)
     }
+    const length = ce.manualLength ?? drawnLength
     // Mid-point for label
     const midIdx = Math.floor(allPts.length / 2)
     const midP = allPts[midIdx]
@@ -1175,6 +1176,24 @@ export default function PlotCanvas() {
           </Layer>
         )}
       </Stage>
+
+      {/* Scale bar overlay */}
+      {(() => {
+        const showScaleBar = useProjectStore.getState().showScaleBar
+        if (!showScaleBar) return null
+        const pxPerMetre = BASE_PX * view.scale
+        const targets = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100]
+        const chosenM = targets.find((m) => m * pxPerMetre >= 60) ?? targets[targets.length - 1]
+        const barPx = chosenM * pxPerMetre
+        return (
+          <div className='absolute bottom-8 left-3 pointer-events-none select-none flex flex-col items-start gap-0.5'>
+            <div className='text-xs font-mono text-gray-600 bg-white/80 px-1 leading-none rounded-sm'>{chosenM >= 1 ? `${chosenM}m` : `${chosenM * 100}cm`}</div>
+            <div className='flex items-center'>
+              <div className='h-2.5 border-l-2 border-b-2 border-r-2 border-gray-600 rounded-b-sm' style={{ width: barPx }} />
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Cursor world position overlay */}
       {cursorPos && (

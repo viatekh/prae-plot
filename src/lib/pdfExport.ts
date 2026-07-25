@@ -48,6 +48,7 @@ function formatDate(): string {
 }
 
 function cableLength(c: CableElement): number {
+  if (c.manualLength != null) return c.manualLength
   const pts = [{ x: c.x, y: c.y }, ...(c.waypoints ?? []), { x: c.x2, y: c.y2 }]
   let len = 0
   for (let i = 1; i < pts.length; i++) len += Math.sqrt((pts[i].x - pts[i-1].x)**2 + (pts[i].y - pts[i-1].y)**2)

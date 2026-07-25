@@ -129,20 +129,35 @@ function ElementProperties({ el }: { el: AnyElement }) {
               <Input type='number' value={(el as CableElement).y2.toFixed(2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<CableElement>)} />
             </Field>
           </div>
-          <div className='text-xs text-gray-500 bg-gray-50 rounded px-2 py-1.5'>
-            {(() => {
-              const ce = el as CableElement
-              const pts = [{ x: ce.x, y: ce.y }, ...(ce.waypoints ?? []), { x: ce.x2, y: ce.y2 }]
-              let len = 0
-              for (let i = 1; i < pts.length; i++) len += Math.sqrt((pts[i].x - pts[i-1].x)**2 + (pts[i].y - pts[i-1].y)**2)
-              const segs = pts.length - 1
-              return `Length: ${len.toFixed(2)}m${segs > 1 ? ` · ${segs} segments, ${pts.length - 2} waypoints` : ''}`
-            })()}
-          </div>
-          <div className='flex items-center gap-1.5 text-xs text-gray-500'>
-            <span className='w-3 h-3 rounded-full shrink-0' style={{ background: CABLE_COLORS[(el as CableElement).cableType] ?? '#9ca3af' }} />
-            {CABLE_LABELS[(el as CableElement).cableType] ?? (el as CableElement).cableType}
-          </div>
+          {(() => {
+            const ce = el as CableElement
+            const pts = [{ x: ce.x, y: ce.y }, ...(ce.waypoints ?? []), { x: ce.x2, y: ce.y2 }]
+            let drawn = 0
+            for (let i = 1; i < pts.length; i++) drawn += Math.sqrt((pts[i].x - pts[i-1].x)**2 + (pts[i].y - pts[i-1].y)**2)
+            const segs = pts.length - 1
+            return (
+              <div className='text-xs text-gray-500 bg-gray-50 rounded px-2 py-1.5 space-y-0.5'>
+                <div>Drawn: {drawn.toFixed(2)}m{segs > 1 ? ` · ${segs} segs` : ''}</div>
+                {ce.manualLength != null && <div className='text-blue-600 font-semibold'>Override: {ce.manualLength.toFixed(2)}m</div>}
+              </div>
+            )
+          })()}
+          <Field label='Manual length override (m)'>
+            <div className='flex items-center gap-1.5'>
+              <Input
+                type='number'
+                value={(el as CableElement).manualLength ?? ''}
+                onChange={(v) => upd({ manualLength: v === '' ? undefined : Math.max(0, parseFloat(v) || 0) } as Partial<CableElement>)}
+              />
+              {(el as CableElement).manualLength != null && (
+                <button
+                  className='text-xs text-gray-400 hover:text-red-500 transition-colors shrink-0'
+                  onClick={() => upd({ manualLength: undefined } as Partial<CableElement>)}
+                  title='Clear override'
+                >✕</button>
+              )}
+            </div>
+          </Field>
           {/* Connection info */}
           {(() => {
             const ce = el as CableElement

@@ -63,6 +63,7 @@ interface ProjectStore {
 
   // ── Canvas options ────────────────────────────────────────
   showUniverseColors: boolean
+  showScaleBar: boolean
   lastAutosave: string | null
 
   // ── Actions: project lifecycle ────────────────────────────
@@ -120,6 +121,7 @@ interface ProjectStore {
   setActiveCableType: (t: CableType) => void
   setAutoAddress: (v: boolean) => void
   setShowUniverseColors: (v: boolean) => void
+  setShowScaleBar: (v: boolean) => void
   setActiveLeftPanel: (p: 'fixtures' | 'power' | 'layers' | 'settings' | 'cable' | 'groups' | 'devices' | null) => void
   setActiveRightPanel: (p: 'properties' | 'circuits' | 'documents') => void
   setProjectInfoModalOpen: (open: boolean) => void
@@ -221,6 +223,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   projectInfoModalOpen: false,
   clipboard: null,
   showUniverseColors: false,
+  showScaleBar: true,
   lastAutosave: null,
 
   createProject: (info) => {
@@ -689,6 +692,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   setActiveCableType: (t) => set({ activeCableType: t }),
   setAutoAddress: (v) => set({ autoAddress: v }),
   setShowUniverseColors: (v) => set({ showUniverseColors: v }),
+  setShowScaleBar: (v) => set({ showScaleBar: v }),
   setActiveLeftPanel: (p) => set({ activeLeftPanel: p }),
   setActiveRightPanel: (p) => set({ activeRightPanel: p }),
   setProjectInfoModalOpen: (open) => set({ projectInfoModalOpen: open }),

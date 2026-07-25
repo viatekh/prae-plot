@@ -83,7 +83,7 @@ export default function EditorPage() {
     activeTool, setActiveTool,
     activeLeftPanel, setActiveLeftPanel,
     mergeProject, lastAutosave,
-    setBackgroundImage,
+    setBackgroundImage, setProjectInfoModalOpen,
   } = useProjectStore()
 
   const [appMode, setAppMode] = useState<'plot' | 'documents'>('plot')
@@ -152,10 +152,15 @@ export default function EditorPage() {
           <ChevronLeft size={18} />
         </button>
 
-        <div className='flex items-center gap-2 mr-1'>
+        <button
+          onClick={() => setProjectInfoModalOpen(true)}
+          className='flex items-center gap-2 mr-1 hover:bg-gray-800 px-2 py-1 rounded transition-colors group'
+          title='Edit project settings'
+        >
           <Zap size={15} className='text-blue-400' />
           <span className='text-white text-sm font-semibold truncate max-w-44'>{project.info.name}</span>
-        </div>
+          <Settings size={11} className='text-gray-600 group-hover:text-gray-400 transition-colors shrink-0' />
+        </button>
         <span className='text-gray-500 text-xs truncate max-w-28 hidden md:block'>{project.info.venue}</span>
 
         <div className='flex bg-gray-800 rounded overflow-hidden mx-2'>
@@ -208,6 +213,9 @@ export default function EditorPage() {
               </button>
             ))}
             <div className='flex-1' />
+            <span className='self-center text-xs text-gray-400 pr-3'>
+              Generated {new Date().toLocaleString()}
+            </span>
             <button onClick={() => setShowExport(true)}
               className='my-1.5 flex items-center gap-1.5 text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 transition-colors'>
               <Download size={12} /> Export PDF
