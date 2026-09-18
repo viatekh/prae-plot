@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Plus, Trash2, MapPin } from 'lucide-react'
-import { useProjectStore } from '../../store/projectStore'
+import { useProjectStore, viewCentreWorld } from '../../store/projectStore'
 import type { DeviceCategory } from '../../types'
 
 const CATEGORY_OPTIONS: { value: DeviceCategory; label: string }[] = [
@@ -40,12 +40,8 @@ export default function DevicesPanel() {
   }
 
   const handlePlaceOnCanvas = (id: string) => {
-    // Place at centre of current view (roughly)
-    const { view } = useProjectStore.getState()
-    const BASE_PX = 50
-    const x = Math.round((-view.x / view.scale / BASE_PX) + 10)
-    const y = Math.round((-view.y / view.scale / BASE_PX) + 8)
-    updateDevice(id, { x: Math.max(0, x), y: Math.max(0, y) })
+    const centre = viewCentreWorld()
+    updateDevice(id, { x: centre.x, y: centre.y })
     setSelectedIds([id])
   }
 

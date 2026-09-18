@@ -82,7 +82,7 @@ export default function ViewPanel() {
         <Section title='Canvas'>
           {flag('grid', 'Grid')}
           {flag('snap', 'Snap to grid')}
-          <Row label={`Grid size (${vo.gridSize}m)`}>
+          <Row label='Grid size'>
             <div className='flex gap-1'>
               {[0.25, 0.5, 1, 2].map((s) => (
                 <button

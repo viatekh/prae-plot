@@ -31,8 +31,15 @@ selection.
 circuit, per phase and per distro, including distros fed from other distros over
 power cables. Overloaded circuits are flagged.
 
-**Layers** — visibility, locking and draw order. A locked layer still prints and
-still shows on screen; it just cannot be selected or dragged.
+**Layers** — visibility, locking and draw order, reorderable from the panel. A
+locked layer still prints and still shows on screen; it just cannot be selected
+or dragged. Deleting a layer keeps its items; they simply lose the assignment.
+
+**View** — one panel for everything that affects what is drawn rather than what
+exists: grid, snap, grid size, scale bar, channel numbers, DMX addresses,
+fixture labels, circuit references, universe colours, cable labels and lengths,
+position names and lengths, shape labels and device names. The settings persist
+between sessions and seed the export, so a sheet matches the screen.
 
 **Documents** — patch sheet, equipment list, cable schedule, power report,
 network and DMX topology, viewable in the app and exportable as PDF.
@@ -59,7 +66,9 @@ Hanging positions print as real truss with bracing and a name tag; channel
 numbers sit in boxed tags; equipment racks print as line work so a mono copy
 still reads.
 
-Export options cover paper size (A4–A1), orientation, scale, which annotations
+Scale can be "Fill sheet" (the exact ratio that fits the frame), "Nearest
+standard" (snapped down to a conventional scale, which leaves a margin), or a
+fixed ratio. Export options cover paper size (A4–A1), orientation, scale, which annotations
 to print (channel numbers, DMX addresses, fixture labels, cable lengths), the
 background image, the grid, the key column and colour-by-layer. The export
 dialog previews the actual PDF before you save it.
@@ -89,6 +98,17 @@ src/
   store/projectStore.ts   zustand store: project data, history, UI state
   types/index.ts          project model, cable and distro catalogues
 ```
+
+## Editing
+
+Drawing tools place a shape and hand you its label field. Space or Escape drops
+back to the select tool; Alt/Option-drag duplicates; Alt-drag on empty space
+pans, as does the middle mouse button or the hand tool. Ctrl/Cmd+0 zooms to
+fit, Ctrl/Cmd+D duplicates, and undo covers every edit, with a burst of typing
+collapsed into one step.
+
+Text annotations are sized in centimetres of real space, so they scale with the
+drawing rather than floating at a fixed screen size.
 
 ## Saving
 

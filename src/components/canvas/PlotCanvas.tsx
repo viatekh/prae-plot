@@ -475,7 +475,7 @@ function DistroNode({ distro, scale, activeTool, selected, vo, onCableClick, onS
       }}
     >
       <Rect x={-W / 2} y={-H / 2} width={W} height={H} fill='#dc2626' stroke={selected ? '#f97316' : '#991b1b'} strokeWidth={(selected ? 3 : 2) / scale} cornerRadius={3 / scale} />
-      <Text x={-W / 2 + 4 / scale} y={-H / 2 + 5 / scale} text={distro.ref ? `${distro.ref} · ${distro.name}` : distro.name} width={W - 8 / scale} fontSize={8 / scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
+      <Text x={-W / 2 + 4 / scale} y={-H / 2 + 5 / scale} text={distro.ref ? `${distro.ref} · ${distro.name}` : distro.name} width={W - 20 / scale} wrap='none' ellipsis fontSize={8 / scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
       {vo.deviceLabels && <>
         <Text x={-W / 2 + 4 / scale} y={-H / 2 + 17 / scale} text={`${distro.incomingRating}A · ${distro.phases}Ø`} fontSize={7 / scale} fontFamily='monospace' fill='#fecaca' listening={false} />
         <Text x={-W / 2 + 4 / scale} y={-H / 2 + 28 / scale} text={`${distro.circuits.length} way${distro.circuits.length !== 1 ? 's' : ''}`} fontSize={7 / scale} fontFamily='monospace' fill='#fecaca' listening={false} />
@@ -531,8 +531,8 @@ function DeviceNode({ device, scale, activeTool, selected, vo, onSelectClick, on
       }}
     >
       <Rect x={-W/2} y={-H/2} width={W} height={H} fill={bgColor} stroke={selected ? '#f97316' : '#00000030'} strokeWidth={(selected ? 2.5 : 1.5) / scale} cornerRadius={3/scale} />
-      <Text x={-W/2+4/scale} y={-H/2+4/scale} text={device.name} width={W-8/scale} fontSize={8/scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
-      {vo.deviceLabels && device.manufacturer && <Text x={-W/2+4/scale} y={-H/2+16/scale} text={device.manufacturer} width={W-8/scale} fontSize={7/scale} fontFamily='monospace' fill='rgba(255,255,255,0.65)' listening={false} />}
+      <Text x={-W/2+4/scale} y={-H/2+4/scale} text={device.name} width={W-20/scale} wrap='none' ellipsis fontSize={8/scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
+      {vo.deviceLabels && device.manufacturer && <Text x={-W/2+4/scale} y={-H/2+16/scale} text={device.manufacturer} width={W-8/scale} wrap='none' ellipsis fontSize={7/scale} fontFamily='monospace' fill='rgba(255,255,255,0.65)' listening={false} />}
       <Text x={W/2-16/scale} y={-H/2+3/scale} text={DEVICE_ICONS[device.category] ?? '◻'} fontSize={10/scale} fill='rgba(255,255,255,0.5)' listening={false} />
     </Group>
   )
@@ -579,9 +579,14 @@ export default function PlotCanvas() {
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
-    const ro = new ResizeObserver(() => setSize({ width: container.offsetWidth, height: container.offsetHeight }))
+    const apply = () => {
+      const next = { width: container.offsetWidth, height: container.offsetHeight }
+      setSize(next)
+      useProjectStore.getState().setCanvasSize(next)
+    }
+    const ro = new ResizeObserver(apply)
     ro.observe(container)
-    setSize({ width: container.offsetWidth, height: container.offsetHeight })
+    apply()
     return () => ro.disconnect()
   }, [])
 

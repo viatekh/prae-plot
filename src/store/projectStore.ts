@@ -21,6 +21,7 @@ import type { ViewOptions } from '../types'
 
 const MAX_HISTORY = 50
 const VIEW_OPTIONS_KEY = 'prae-plot:view-options'
+const GDTF_LIBRARY_KEY = 'prae-plot:gdtf-library'
 const COALESCE_MS = 700
 
 // Tracks the last coalesced edit so a burst of them shares one undo step.
@@ -46,6 +47,9 @@ interface HistoryEntry {
   fixtures: PlacedFixture[]
   distros: Distro[]
   layers: Layer[]
+  devices: Device[]
+  groups: FixtureGroup[]
+  backgroundImage?: BackgroundImage
 }
 
 interface ProjectStore {
@@ -60,6 +64,8 @@ interface ProjectStore {
   // ── Canvas UI state ───────────────────────────────────────
   view: CanvasViewState
   viewOptions: ViewOptions
+  /** Pixel size of the drawing surface, kept current by the canvas. */
+  canvasSize: { width: number; height: number }
 
   // ── Tool state ────────────────────────────────────────────
   activeTool: ToolType
@@ -137,6 +143,7 @@ interface ProjectStore {
   setActiveTool: (tool: ToolType) => void
   setSelectedIds: (ids: string[]) => void
   setView: (view: Partial<CanvasViewState>) => void
+  setCanvasSize: (size: { width: number; height: number }) => void
   setViewOption: <K extends keyof ViewOptions>(key: K, value: ViewOptions[K]) => void
   setLabelDraftId: (id: string | null) => void
   setActiveLayerId: (id: string) => void
@@ -180,12 +187,20 @@ function newProject(info: ProjectInfo): Project {
   }
 }
 
+/**
+ * Every mutation here replaces arrays rather than mutating them, so a history
+ * entry can hold references. Deep-cloning would copy a megabyte of background
+ * image on every edit.
+ */
 function snapshot(project: Project): HistoryEntry {
   return {
-    elements: JSON.parse(JSON.stringify(project.elements)),
-    fixtures: JSON.parse(JSON.stringify(project.fixtures)),
-    distros: JSON.parse(JSON.stringify(project.distros)),
-    layers: JSON.parse(JSON.stringify(project.layers)),
+    elements: project.elements,
+    fixtures: project.fixtures,
+    distros: project.distros,
+    layers: project.layers,
+    devices: project.devices,
+    groups: project.groups,
+    backgroundImage: project.backgroundImage,
   }
 }
 
@@ -238,6 +253,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   future: [],
   view: { scale: 1, x: 80, y: 80 },
   viewOptions: loadViewOptions(),
+  canvasSize: { width: 900, height: 600 },
   activeTool: 'select',
   selectedIds: [],
   activeLayerId: 'lighting',
@@ -282,12 +298,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   setBackgroundImage: (img) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     set({ project: { ...project, backgroundImage: img }, isDirty: true })
   },
 
   updateBackgroundImage: (updates) => {
     const { project } = get()
     if (!project || !project.backgroundImage) return
+    get().pushHistoryCoalesced(`background:${Object.keys(updates).join(',')}`)
     set({ project: { ...project, backgroundImage: { ...project.backgroundImage, ...updates } }, isDirty: true })
   },
 
@@ -446,6 +464,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addLayer: (layer) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     const order = project.layers.length
     const newLayer: Layer = { ...layer, id: generateId(), order }
     set({ project: { ...project, layers: [...project.layers, newLayer] }, isDirty: true })
@@ -454,6 +473,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateLayer: (id, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`layer:${id}:${Object.keys(updates).join(',')}`)
     set({
       project: { ...project, layers: project.layers.map((l) => (l.id === id ? { ...l, ...updates } : l)) },
       isDirty: true,
@@ -463,6 +483,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   deleteLayer: (id) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     // Items keep existing; they just lose the layer that no longer exists.
     const clear = <T extends { layerId?: string }>(item: T): T =>
       item.layerId === id ? { ...item, layerId: undefined } : item
@@ -483,6 +504,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   moveLayer: (id, direction) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     const sorted = [...project.layers].sort((a, b) => a.order - b.order)
     const idx = sorted.findIndex((l) => l.id === id)
     const target = idx + (direction === 'up' ? -1 : 1)
@@ -504,6 +526,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addDistro: (d) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     // Auto-assign next available letter ref (A, B, C … Z, AA, AB …)
     const usedRefs = new Set(project.distros.map((x) => x.ref).filter(Boolean))
     let nextRef = ''
@@ -526,6 +549,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateDistro: (id, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`distro:${id}:${Object.keys(updates).join(',')}`)
     set({
       project: { ...project, distros: project.distros.map((d) => (d.id === id ? { ...d, ...updates } : d)) },
       isDirty: true,
@@ -535,12 +559,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   deleteDistro: (id) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     set({ project: { ...project, distros: project.distros.filter((d) => d.id !== id) }, isDirty: true })
   },
 
   addCircuit: (distroId, c) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     const circuit: Circuit = { ...c, id: generateId() }
     set({
       project: {
@@ -556,6 +582,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateCircuit: (distroId, circuitId, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`circuit:${circuitId}:${Object.keys(updates).join(',')}`)
     set({
       project: {
         ...project,
@@ -572,6 +599,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   deleteCircuit: (distroId, circuitId) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     set({
       project: {
         ...project,
@@ -587,17 +615,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addDevice: (d) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     const device: Device = { ...d, id: generateId() }
     set({ project: { ...project, devices: [...project.devices, device] }, isDirty: true })
   },
   updateDevice: (id, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`device:${id}:${Object.keys(updates).join(',')}`)
     set({ project: { ...project, devices: project.devices.map((d) => d.id === id ? { ...d, ...updates } : d) }, isDirty: true })
   },
   deleteDevice: (id) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     set({ project: { ...project, devices: project.devices.filter((d) => d.id !== id) }, isDirty: true })
   },
 
@@ -605,17 +636,20 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   addGroup: (g) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     const group: FixtureGroup = { ...g, id: generateId() }
     set({ project: { ...project, groups: [...project.groups, group] }, isDirty: true })
   },
   updateGroup: (id, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`group:${id}:${Object.keys(updates).join(',')}`)
     set({ project: { ...project, groups: project.groups.map((g) => g.id === id ? { ...g, ...updates } : g) }, isDirty: true })
   },
   deleteGroup: (id) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
     set({ project: { ...project, groups: project.groups.filter((g) => g.id !== id) }, isDirty: true })
   },
 
@@ -782,6 +816,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
   setSelectedIds: (ids) => set({ selectedIds: ids }),
   setView: (view) => set((s) => ({ view: { ...s.view, ...view } })),
+  setCanvasSize: (size) => set({ canvasSize: size }),
   setViewOption: (key, value) =>
     set((s) => {
       const viewOptions = { ...s.viewOptions, [key]: value }
@@ -799,37 +834,47 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateGDTFFixtureType: (id, updates) =>
     useProjectStore.setState((s) => {
       const next = s.gdtfLibrary.map((f) => f.id === id ? { ...f, ...updates } : f)
-      localStorage.setItem('praePlot_gdtfLibrary', JSON.stringify(next))
+      try { localStorage.setItem(GDTF_LIBRARY_KEY, JSON.stringify(next)) } catch { /* quota */ }
       return { gdtfLibrary: next }
     }),
   addToGDTFLibrary: (ft) =>
     set((s) => {
       const next = [...s.gdtfLibrary.filter((f) => f.id !== ft.id), ft]
-      try { localStorage.setItem('prae-plot:gdtf-library', JSON.stringify(next)) } catch { /* quota */ }
+      try { localStorage.setItem(GDTF_LIBRARY_KEY, JSON.stringify(next)) } catch { /* quota */ }
       return { gdtfLibrary: next }
     }),
   removeFromGDTFLibrary: (id) =>
     set((s) => {
       const next = s.gdtfLibrary.filter((f) => f.id !== id)
-      try { localStorage.setItem('prae-plot:gdtf-library', JSON.stringify(next)) } catch { /* quota */ }
+      try { localStorage.setItem(GDTF_LIBRARY_KEY, JSON.stringify(next)) } catch { /* quota */ }
       return { gdtfLibrary: next }
     }),
   setSelectedFixtureType: (ft) => set({ selectedFixtureType: ft }),
 }))
 
 // Dev-only handle so the app can be driven from the console or a browser test.
-if (import.meta.env.DEV) {
+if (typeof window !== 'undefined' && import.meta.env?.DEV) {
   ;(window as unknown as { praePlotStore?: typeof useProjectStore }).praePlotStore = useProjectStore
 }
 
 // Hydrate GDTF library from localStorage on first load
 try {
-  const saved = localStorage.getItem('prae-plot:gdtf-library')
+  const saved = localStorage.getItem(GDTF_LIBRARY_KEY)
   if (saved) {
     const parsed = JSON.parse(saved)
     if (Array.isArray(parsed)) useProjectStore.setState({ gdtfLibrary: parsed })
   }
 } catch { /* ignore */ }
+
+/** Centre of what the canvas is currently showing, in metres. */
+export function viewCentreWorld(): { x: number; y: number } {
+  const { view, canvasSize } = useProjectStore.getState()
+  const BASE_PX = 50
+  return {
+    x: Math.round(((canvasSize.width / 2 - view.x) / (view.scale * BASE_PX)) * 10) / 10,
+    y: Math.round(((canvasSize.height / 2 - view.y) / (view.scale * BASE_PX)) * 10) / 10,
+  }
+}
 
 // ── Autosave recovery ─────────────────────────────────────────
 // The editor autosaves to localStorage; without this the snapshot was written

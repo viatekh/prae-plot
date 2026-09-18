@@ -2,6 +2,13 @@ import { useEffect, useRef } from 'react'
 import { useProjectStore, computeCircuitLoad, circuitCapacityW, formatCircuitRef, findAddressConflicts, computeDistroLoad } from '../../store/projectStore'
 import type { AnyElement, PlacedFixture, RectElement, EllipseElement, TrussElement, TextElement, CableElement, CableType, Distro, Device } from '../../types'
 import { CABLE_COLORS, CABLE_LABELS, CABLE_GROUPS, DEFAULT_TEXT_CM } from '../../types'
+import { cableLength } from '../../lib/utils'
+
+/** Rounds for display without forcing trailing zeros, which eat the caret. */
+function num(v: number, dp = 2): number {
+  const f = 10 ** dp
+  return Math.round(v * f) / f
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -87,20 +94,20 @@ function ElementProperties({ el }: { el: AnyElement }) {
       {el.type === 'rect' && (
         <div className='grid grid-cols-2 gap-2'>
           <Field label='W (m)'>
-            <Input type='number' value={(el as RectElement).width.toFixed(2)} onChange={(v) => upd({ width: parseFloat(v) || 1 } as Partial<RectElement>)} />
+            <Input type='number' value={num((el as RectElement).width)} onChange={(v) => upd({ width: parseFloat(v) || 1 } as Partial<RectElement>)} />
           </Field>
           <Field label='H (m)'>
-            <Input type='number' value={(el as RectElement).height.toFixed(2)} onChange={(v) => upd({ height: parseFloat(v) || 1 } as Partial<RectElement>)} />
+            <Input type='number' value={num((el as RectElement).height)} onChange={(v) => upd({ height: parseFloat(v) || 1 } as Partial<RectElement>)} />
           </Field>
         </div>
       )}
       {el.type === 'ellipse' && (
         <div className='grid grid-cols-2 gap-2'>
           <Field label='Radius X (m)'>
-            <Input type='number' value={(el as EllipseElement).radiusX.toFixed(2)} onChange={(v) => upd({ radiusX: parseFloat(v) || 1 } as Partial<EllipseElement>)} />
+            <Input type='number' value={num((el as EllipseElement).radiusX)} onChange={(v) => upd({ radiusX: parseFloat(v) || 1 } as Partial<EllipseElement>)} />
           </Field>
           <Field label='Radius Y (m)'>
-            <Input type='number' value={(el as EllipseElement).radiusY.toFixed(2)} onChange={(v) => upd({ radiusY: parseFloat(v) || 1 } as Partial<EllipseElement>)} />
+            <Input type='number' value={num((el as EllipseElement).radiusY)} onChange={(v) => upd({ radiusY: parseFloat(v) || 1 } as Partial<EllipseElement>)} />
           </Field>
         </div>
       )}
@@ -108,10 +115,10 @@ function ElementProperties({ el }: { el: AnyElement }) {
       {el.type === 'truss' && (
         <div className='grid grid-cols-2 gap-2'>
           <Field label='End X (m)'>
-            <Input type='number' value={(el as TrussElement).x2.toFixed(2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
+            <Input type='number' value={num((el as TrussElement).x2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
           </Field>
           <Field label='End Y (m)'>
-            <Input type='number' value={(el as TrussElement).y2.toFixed(2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
+            <Input type='number' value={num((el as TrussElement).y2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
           </Field>
         </div>
       )}
@@ -146,18 +153,16 @@ function ElementProperties({ el }: { el: AnyElement }) {
           </Field>
           <div className='grid grid-cols-2 gap-2'>
             <Field label='End X (m)'>
-              <Input type='number' value={(el as CableElement).x2.toFixed(2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<CableElement>)} />
+              <Input type='number' value={num((el as CableElement).x2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<CableElement>)} />
             </Field>
             <Field label='End Y (m)'>
-              <Input type='number' value={(el as CableElement).y2.toFixed(2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<CableElement>)} />
+              <Input type='number' value={num((el as CableElement).y2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<CableElement>)} />
             </Field>
           </div>
           {(() => {
             const ce = el as CableElement
-            const pts = [{ x: ce.x, y: ce.y }, ...(ce.waypoints ?? []), { x: ce.x2, y: ce.y2 }]
-            let drawn = 0
-            for (let i = 1; i < pts.length; i++) drawn += Math.sqrt((pts[i].x - pts[i-1].x)**2 + (pts[i].y - pts[i-1].y)**2)
-            const segs = pts.length - 1
+            const drawn = cableLength({ ...ce, manualLength: undefined })
+            const segs = (ce.waypoints?.length ?? 0) + 1
             return (
               <div className='text-xs text-gray-500 bg-gray-50 rounded px-2 py-1.5 space-y-0.5'>
                 <div>Drawn: {drawn.toFixed(2)}m{segs > 1 ? ` · ${segs} segs` : ''}</div>
@@ -213,9 +218,11 @@ function ElementProperties({ el }: { el: AnyElement }) {
         </>
       )}
 
-      <Field label='Rotation (°)'>
-        <Input type='number' value={el.rotation.toFixed(1)} onChange={(v) => upd({ rotation: parseFloat(v) || 0 })} />
-      </Field>
+      {el.type !== 'truss' && el.type !== 'cable' && (
+        <Field label='Rotation (°)'>
+          <Input type='number' value={num(el.rotation, 1)} onChange={(v) => upd({ rotation: parseFloat(v) || 0 })} />
+        </Field>
+      )}
 
       {el.type !== 'text' && el.type !== 'cable' && (
         <div className='flex flex-col gap-2'>
@@ -295,7 +302,7 @@ function FixtureProperties({ fixture }: { fixture: PlacedFixture }) {
         <button
           onClick={() => autoRepatch([fixture.id])}
           className='text-xs text-blue-600 hover:text-blue-800 hover:underline shrink-0'
-          title='Move to next free address slot'
+          title='Repack this fixture into the first free slot on its own universe'
         >Re-address</button>
       </div>
 
@@ -381,7 +388,7 @@ function FixtureProperties({ fixture }: { fixture: PlacedFixture }) {
       </Field>
 
       <Field label='Rotation (°)'>
-        <Input type='number' value={fixture.rotation.toFixed(1)} onChange={(v) => upd({ rotation: parseFloat(v) || 0 })} />
+        <Input type='number' value={num(fixture.rotation, 1)} onChange={(v) => upd({ rotation: parseFloat(v) || 0 })} />
       </Field>
 
       <Field label='Notes'>

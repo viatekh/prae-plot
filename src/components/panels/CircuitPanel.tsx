@@ -1,11 +1,9 @@
 import { useState } from 'react'
 import { Plus, Trash2, ChevronDown, ChevronRight, AlertTriangle, AlertCircle, CheckCircle, MapPin } from 'lucide-react'
-import { useProjectStore, computeCircuitLoad, computeDistroLoad, circuitCapacityW, loadStatus } from '../../store/projectStore'
+import { useProjectStore, computeCircuitLoad, computeDistroLoad, circuitCapacityW, loadStatus, viewCentreWorld } from '../../store/projectStore'
 import type { Project, Distro, Circuit, PlacedFixture } from '../../types'
 import { DISTRO_PRESETS } from '../../types'
 import { cn, generateId } from '../../lib/utils'
-
-const BASE_PX = 50
 
 function LoadBar({ loadW, capacityW }: { loadW: number; capacityW: number }) {
   const pct = Math.min(100, (loadW / capacityW) * 100)
@@ -73,7 +71,7 @@ function CircuitRow({ circuit, distroId, fixtures }: { circuit: Circuit; distroI
 }
 
 function DistroCard({ distro }: { distro: Distro }) {
-  const { project, view, updateDistro, deleteDistro, addCircuit } = useProjectStore()
+  const { project, updateDistro, deleteDistro, addCircuit } = useProjectStore()
   const fixtures = project?.fixtures ?? []
   const allDistros = project?.distros ?? []
   const elements = project?.elements ?? []
@@ -81,9 +79,9 @@ function DistroCard({ distro }: { distro: Distro }) {
 
   const placeOnCanvas = (e: React.MouseEvent) => {
     e.stopPropagation()
-    const cx = (-view.x + 450) / (view.scale * BASE_PX)
-    const cy = (-view.y + 300) / (view.scale * BASE_PX)
-    updateDistro(distro.id, { x: cx, y: cy, layerId: 'power' })
+    const centre = viewCentreWorld()
+    updateDistro(distro.id, { x: centre.x, y: centre.y, layerId: 'power' })
+    useProjectStore.getState().setSelectedIds([distro.id])
   }
 
   // Total load includes downstream distros connected via cables
