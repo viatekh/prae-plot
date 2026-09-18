@@ -54,10 +54,18 @@ function SegButton<T extends string | number>({ options, value, onChange }: {
 }
 
 export default function ExportModal({ project, onClose }: Props) {
-  const gridSize = useProjectStore((s) => s.gridSize)
+  const viewOptions = useProjectStore((s) => s.viewOptions)
 
   const [tab, setTab] = useState<Tab>('plot')
-  const [opts, setOpts] = useState<PlotOptions>(DEFAULT_PLOT_OPTIONS)
+  // Seed the sheet from what is on screen, so an export matches the canvas.
+  const [opts, setOpts] = useState<PlotOptions>(() => ({
+    ...DEFAULT_PLOT_OPTIONS,
+    showGrid: viewOptions.grid,
+    showChannels: viewOptions.channels,
+    showAddresses: viewOptions.addresses,
+    showFixtureLabels: viewOptions.fixtureLabels,
+    showCableLabels: viewOptions.cableLabels || viewOptions.cableLengths,
+  }))
   const [perLayer, setPerLayer] = useState(false)
   const [selectedLayers, setSelectedLayers] = useState<Set<string>>(
     () => new Set(project.layers.filter((l) => l.visible).map((l) => l.id)),
@@ -92,7 +100,7 @@ export default function ExportModal({ project, onClose }: Props) {
         const pages: PlotPage[] = perLayer
           ? orderedLayers.filter((l) => selectedLayers.has(l.id)).map((l) => ({ label: l.name, layerIds: [l.id] }))
           : [{ layerIds }]
-        return buildPlotPDF(project, { options: opts, pages: pages.length ? pages : [{ layerIds: [] }], gridSize })
+        return buildPlotPDF(project, { options: opts, pages: pages.length ? pages : [{ layerIds: [] }], gridSize: viewOptions.gridSize })
       }
       case 'patch': return buildPatchPDF(project)
       case 'equipment': return buildEquipmentPDF(project)
@@ -100,7 +108,7 @@ export default function ExportModal({ project, onClose }: Props) {
       case 'power': return buildPowerPDF(project)
       case 'groups': return buildGroupsPDF(project)
     }
-  }, [tab, project, opts, perLayer, orderedLayers, selectedLayers, layerIds, gridSize])
+  }, [tab, project, opts, perLayer, orderedLayers, selectedLayers, layerIds, viewOptions])
 
   // Live preview — the PDF itself is the preview, so what you see is what saves.
   useEffect(() => {
@@ -204,14 +212,16 @@ export default function ExportModal({ project, onClose }: Props) {
                   <div className='text-xs font-semibold text-gray-600 mb-1.5'>Drawing scale</div>
                   <SegButton<string>
                     options={[
-                      { value: 'fit', label: 'Best fit' },
+                      { value: 'fit', label: 'Fill sheet' },
+                      { value: 'standard', label: 'Nearest standard' },
                       ...STANDARD_SCALES.map((s) => ({ value: String(s), label: `1:${s}` })),
                     ]}
-                    value={opts.scale === 'fit' ? 'fit' : String(opts.scale)}
-                    onChange={(v) => setOpt('scale', v === 'fit' ? 'fit' : Number(v))}
+                    value={typeof opts.scale === 'number' ? String(opts.scale) : opts.scale}
+                    onChange={(v) => setOpt('scale', v === 'fit' || v === 'standard' ? v : Number(v))}
                   />
                   <div className='text-xs text-gray-400 mt-1.5 leading-snug'>
-                    Best fit picks the largest standard scale the drawing fits at.
+                    Fill sheet uses the exact ratio that fits the frame. Nearest standard
+                    snaps down to a conventional scale, which leaves a margin.
                   </div>
                 </div>
 

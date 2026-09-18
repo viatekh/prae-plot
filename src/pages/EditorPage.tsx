@@ -3,7 +3,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import {
   Save, ChevronLeft, Download, FolderOpen, LayoutTemplate, BookOpen,
   MousePointer2, Hand, Square, Pentagon, Circle, Type, Zap, Bolt,
-  Cable, Layers, Settings, Image, Minus, Users, Monitor,
+  Cable, Layers, Settings, Image, Minus, Users, Monitor, Eye,
 } from 'lucide-react'
 import { useProjectStore } from '../store/projectStore'
 import { formatVersion, loadImageFile } from '../lib/utils'
@@ -16,7 +16,7 @@ import LayersPanel from '../components/panels/LayersPanel'
 import PropertiesPanel from '../components/panels/PropertiesPanel'
 import CircuitPanel from '../components/panels/CircuitPanel'
 import CablePanel from '../components/panels/CablePanel'
-import SettingsPanel from '../components/panels/SettingsPanel'
+import ViewPanel from '../components/panels/ViewPanel'
 import GroupsPanel from '../components/panels/GroupsPanel'
 import DevicesPanel from '../components/panels/DevicesPanel'
 import PatchSheet from '../components/documents/PatchSheet'
@@ -257,7 +257,7 @@ export default function EditorPage() {
           <div className='w-12 bg-white border-r border-gray-200 flex flex-col items-center py-1.5 gap-0.5 shrink-0 overflow-y-auto'>
 
             {/* Settings */}
-            <StripBtn icon={<Settings size={16} />} label='Settings' active={activeLeftPanel === 'settings'} onClick={() => togglePanel('settings')} />
+            <StripBtn icon={<Eye size={16} />} label='View options' active={activeLeftPanel === 'view'} onClick={() => togglePanel('view')} />
 
             <Divider />
 
@@ -290,7 +290,7 @@ export default function EditorPage() {
           {activeLeftPanel && (
             <>
               <div style={{ width: leftDrawerW }} className='bg-white border-r border-gray-200 flex flex-col overflow-hidden shrink-0'>
-                {activeLeftPanel === 'settings'  && <SettingsPanel />}
+                {activeLeftPanel === 'view'      && <ViewPanel />}
                 {activeLeftPanel === 'fixtures'  && <FixtureLibrary />}
                 {activeLeftPanel === 'power'     && <CircuitPanel />}
                 {activeLeftPanel === 'cable'     && <CablePanel />}

@@ -51,8 +51,11 @@ export function paperDimensions(size: PaperSize, orientation: Orientation): { w:
 export interface PlotOptions {
   paper: PaperSize
   orientation: Orientation
-  /** 'fit' picks the largest standard scale that fits the paper. */
-  scale: 'fit' | number
+  /**
+   * 'fit' fills the sheet exactly; 'standard' snaps down to the largest
+   * standard architectural scale that still fits; a number is that scale.
+   */
+  scale: 'fit' | 'standard' | number
   showGrid: boolean
   showBackground: boolean
   showChannels: boolean
@@ -166,8 +169,8 @@ export function contentBounds(content: PlotContent): Bounds | null {
 
   if (!any) return null
   // A little breathing room so annotations near the edge are not clipped.
-  const padX = Math.max(0.5, (maxX - minX) * 0.03)
-  const padY = Math.max(0.5, (maxY - minY) * 0.03)
+  const padX = Math.max(0.25, (maxX - minX) * 0.015)
+  const padY = Math.max(0.25, (maxY - minY) * 0.015)
   return { minX: minX - padX, minY: minY - padY, maxX: maxX + padX, maxY: maxY + padY }
 }
 
@@ -192,11 +195,15 @@ export function chooseScale(bounds: Bounds, frameW: number, frameH: number, requ
     return { mmPerM, denominator: requested, standard: true, overflow: mmPerM > maxMmPerM * 1.001 }
   }
 
-  const standard = STANDARD_SCALES.find((d) => 1000 / d <= maxMmPerM)
-  if (standard) return { mmPerM: 1000 / standard, denominator: standard, standard: true, overflow: false }
+  if (requested === 'standard') {
+    const standard = STANDARD_SCALES.find((d) => 1000 / d <= maxMmPerM)
+    if (standard) return { mmPerM: 1000 / standard, denominator: standard, standard: true, overflow: false }
+  }
 
-  // Bigger than 1:500 — fall back to a rounded non-standard ratio that fits.
-  const denominator = Math.ceil(1000 / maxMmPerM / 50) * 50
+  // Fill the sheet: use the exact ratio that fits and report it honestly. The
+  // denominator is rounded up by a whole number so the printed ratio is true
+  // rather than flattering.
+  const denominator = Math.ceil(1000 / maxMmPerM)
   return { mmPerM: 1000 / denominator, denominator, standard: false, overflow: false }
 }
 
@@ -606,8 +613,10 @@ function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Tra
       drawCable(pdf, el as CableElement, t, opts)
     } else if (el.type === 'text') {
       const tx = el as TextElement
-      drawText(pdf, tx.text, t.x(tx.x), t.y(tx.y), {
-        size: Math.max(4.5, Math.min(11, (tx.fontSize || 14) * 0.5)),
+      // fontSize is centimetres of real space, so it scales with the drawing.
+      const mm = ((tx.fontSize || 30) / 100) * t.mmPerM
+      drawText(pdf, tx.text, t.x(tx.x), t.y(tx.y) + mm * 0.8, {
+        size: Math.max(2, mm / PT),
         color: hexToRgb(tx.fill || '#1f2937'),
         spacing: 0.15,
       })

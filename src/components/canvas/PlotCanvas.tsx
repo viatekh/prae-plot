@@ -2,12 +2,13 @@ import { useRef, useEffect, useCallback, useState } from 'react'
 import { Stage, Layer, Rect, Ellipse, Line, Circle, Text, Image as KonvaImage, Group, Transformer } from 'react-konva'
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
-import { useProjectStore } from '../../store/projectStore'
+import { useProjectStore, formatCircuitRef } from '../../store/projectStore'
 import { generateId, cableLength } from '../../lib/utils'
 import type {
-  AnyElement, PlacedFixture, RectElement, EllipseElement, PolygonElement, TrussElement, TextElement, CableElement, Distro,
+  AnyElement, PlacedFixture, RectElement, EllipseElement, PolygonElement, TrussElement, TextElement, CableElement,
+  Distro, ViewOptions,
 } from '../../types'
-import { CABLE_COLORS } from '../../types'
+import { CABLE_COLORS, DEFAULT_TEXT_CM } from '../../types'
 import { SYMBOL_RADIUS, symbolColors } from '../../lib/symbols'
 import { symbolShapes, symbolLineWidth } from '../../lib/symbolGeometry'
 import type { FillRole } from '../../lib/symbolGeometry'
@@ -31,14 +32,13 @@ function GridLayer({ width, height, view, gridSize }: {
   view: { scale: number; x: number; y: number }; gridSize: number
 }) {
   const step = gridSize * BASE_PX
-  const worldLeft  = Math.max(0, -view.x / view.scale)
-  const worldTop   = Math.max(0, -view.y / view.scale)
+  const worldLeft  = -view.x / view.scale
+  const worldTop   = -view.y / view.scale
   const worldRight  = (width  - view.x) / view.scale
   const worldBottom = (height - view.y) / view.scale
 
-  // Clamp start to 0 — no negative grid
-  const startX = Math.max(0, Math.floor(worldLeft / step) * step)
-  const startY = Math.max(0, Math.floor(worldTop  / step) * step)
+  const startX = Math.floor(worldLeft / step) * step
+  const startY = Math.floor(worldTop  / step) * step
 
   const minor: React.ReactElement[] = []
   const major: React.ReactElement[] = []
@@ -75,9 +75,11 @@ function GridLayer({ width, height, view, gridSize }: {
 
 // ── Fixture symbol ────────────────────────────────────────────
 
-function FixtureSymbol({ fixture, selected, scale, showUniverseColors, draggable, onClick, onDragEnd }: {
-  fixture: PlacedFixture; selected: boolean; scale: number; showUniverseColors: boolean; draggable: boolean
+function FixtureSymbol({ fixture, selected, scale, vo, circuitRef, draggable, onClick, onDragStart, onDragEnd }: {
+  fixture: PlacedFixture; selected: boolean; scale: number; vo: ViewOptions
+  circuitRef: string; draggable: boolean
   onClick: (e: KonvaEventObject<MouseEvent>) => void
+  onDragStart: (id: string) => void
   onDragEnd: (id: string, x: number, y: number) => void
 }) {
   const colors = symbolColors(fixture.symbol)
@@ -122,6 +124,7 @@ function FixtureSymbol({ fixture, selected, scale, showUniverseColors, draggable
       id={fixture.id}
       x={x} y={y} rotation={fixture.rotation} draggable={draggable}
       onClick={onClick}
+      onDragStart={() => onDragStart(fixture.id)}
       onDragEnd={(e) => onDragEnd(fixture.id, e.target.x() / BASE_PX, e.target.y() / BASE_PX)}
       onTransformEnd={(e) => {
         const node = e.target
@@ -131,170 +134,290 @@ function FixtureSymbol({ fixture, selected, scale, showUniverseColors, draggable
     >
       {renderBody()}
       {/* Universe color ring */}
-      {showUniverseColors && <Circle radius={r + 4 / scale} fill='transparent' stroke={UNIVERSE_COLORS[(fixture.universe - 1) % UNIVERSE_COLORS.length]} strokeWidth={2 / scale} listening={false} />}
+      {vo.universeColors && <Circle radius={r + 4 / scale} fill='transparent' stroke={UNIVERSE_COLORS[(fixture.universe - 1) % UNIVERSE_COLORS.length]} strokeWidth={2 / scale} listening={false} />}
       {/* Annotations counter-rotate so they stay upright whichever way the
           fixture points — a plot label is read off the page, not the symbol. */}
       <Group rotation={-fixture.rotation} listening={false}>
         {/* CH above symbol */}
-        {fixture.channel > 0 && <Text x={-22 / scale} y={-r - 18 / scale} width={44 / scale} text={String(fixture.channel)} fontSize={10 / scale} fontFamily='monospace' fill='#1f2937' fontStyle='bold' align='center' listening={false} />}
-        {/* DMX address below symbol */}
-        <Text x={-26 / scale} y={r + 3 / scale} width={52 / scale} text={addrLabel} fontSize={8 / scale} fontFamily='monospace' fill='#6b7280' align='center' listening={false} />
-        {/* Label further below */}
-        {fixture.label && <Text x={-26 / scale} y={r + 14 / scale} width={52 / scale} text={fixture.label} fontSize={8 / scale} fontFamily='monospace' fill='#374151' align='center' listening={false} />}
+        {vo.channels && fixture.channel > 0 && <Text x={-22 / scale} y={-r - 18 / scale} width={44 / scale} text={String(fixture.channel)} fontSize={10 / scale} fontFamily='monospace' fill='#1f2937' fontStyle='bold' align='center' listening={false} />}
+        {/* Annotation stack below the symbol */}
+        {(() => {
+          const lines = [
+            vo.addresses && addrLabel,
+            vo.circuitRefs && circuitRef !== '—' && circuitRef,
+            vo.fixtureLabels && fixture.label,
+          ].filter(Boolean) as string[]
+          return lines.map((line, i) => (
+            <Text key={i} x={-30 / scale} y={r + (3 + i * 11) / scale} width={60 / scale} text={line}
+              fontSize={8 / scale} fontFamily='monospace' fill={i === 0 ? '#6b7280' : '#374151'}
+              align='center' listening={false} />
+          ))
+        })()}
       </Group>
     </Group>
   )
 }
 
 // ── Stage element ─────────────────────────────────────────────
+// Two rules keep the Transformer honest:
+//   1. the node it is attached to holds geometry only — a label inside it would
+//      inflate the bounding box, so the handles would sit away from the shape
+//      and resizing would behave as if the shape were somewhere else;
+//   2. that geometry is local, with the node itself positioned, so scaling
+//      multiplies the size rather than the distance from the origin.
+// Labels are therefore drawn as siblings, and they never scale with the shape.
 
-function StageElementNode({ el, selected, scale, locked, onClick, onDragEnd }: {
-  el: AnyElement; selected: boolean; scale: number; locked: boolean
+/** Object label, drawn upright beside the shape it names. */
+function ShapeLabel({ text, x, y, scale }: { text: string; x: number; y: number; scale: number }) {
+  const w = 240 / scale
+  return (
+    <Text
+      x={x - w / 2} y={y - 7 / scale} width={w} text={text} listening={false}
+      fontSize={11 / scale} fontFamily='sans-serif' fill='#374151' align='center'
+    />
+  )
+}
+
+interface ElementNodeProps {
+  el: AnyElement
+  selected: boolean
+  scale: number
+  locked: boolean
+  vo: ViewOptions
   onClick: (e: KonvaEventObject<MouseEvent>) => void
+  onDragStart: (id: string) => void
+  /** Absolute new position in metres. */
   onDragEnd: (id: string, x: number, y: number) => void
-}) {
+}
+
+function StageElementNode({ el, selected, scale, locked, vo, onClick, onDragStart, onDragEnd }: ElementNodeProps) {
   const sw = (selected ? 2 : 1) / scale
   const stroke = selected ? '#f97316' : (el.stroke || '#374151')
+  const draggable = !el.locked && !locked
+  const update = (updates: Partial<AnyElement>) => useProjectStore.getState().updateElement(el.id, updates)
 
-  // Resolved fill: empty string → transparent
+  // Empty fill means "no fill" — but the shape still needs a hit area, or it
+  // becomes impossible to click anywhere except exactly on its outline.
   const resolvedFill = (raw: string | undefined, fallback: string) =>
-    raw === '' || raw === 'transparent' ? 'transparent' : (raw || fallback)
+    raw === '' || raw === 'transparent' ? 'rgba(0,0,0,0.001)' : (raw || fallback)
+
+  const common = {
+    id: el.id,
+    draggable,
+    onClick,
+    onDragStart: () => onDragStart(el.id),
+    onDragEnd: (e: KonvaEventObject<DragEvent>) =>
+      onDragEnd(el.id, e.target.x() / BASE_PX, e.target.y() / BASE_PX),
+  }
+  const showLabel = vo.elementLabels && !!el.label
 
   if (el.type === 'rect') {
     const re = el as RectElement
-    const cx = re.x * BASE_PX + (re.width * BASE_PX) / 2
-    const cy = re.y * BASE_PX + (re.height * BASE_PX) / 2
-    return (
-      <Group id={re.id} x={0} y={0} draggable={!re.locked && !locked} onClick={onClick}
-        onDragEnd={(e) => { onDragEnd(re.id, re.x + e.target.x() / BASE_PX, re.y + e.target.y() / BASE_PX); e.target.x(0); e.target.y(0) }}
+    const w = re.width * BASE_PX
+    const h = re.height * BASE_PX
+    const rad = (re.rotation * Math.PI) / 180
+    const cx = re.x * BASE_PX + (w / 2) * Math.cos(rad) - (h / 2) * Math.sin(rad)
+    const cy = re.y * BASE_PX + (w / 2) * Math.sin(rad) + (h / 2) * Math.cos(rad)
+    return (<>
+      <Rect
+        {...common}
+        x={re.x * BASE_PX} y={re.y * BASE_PX} width={w} height={h} rotation={re.rotation}
+        fill={resolvedFill(re.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
         onTransformEnd={(e) => {
-          const node = e.target as Konva.Node
-          useProjectStore.getState().updateElement(re.id, {
-            x: (re.x * BASE_PX + node.x()) / BASE_PX, y: (re.y * BASE_PX + node.y()) / BASE_PX,
-            width: Math.max(0.1, (re.width * BASE_PX * node.scaleX()) / BASE_PX),
-            height: Math.max(0.1, (re.height * BASE_PX * node.scaleY()) / BASE_PX),
+          const node = e.target
+          update({
+            x: node.x() / BASE_PX, y: node.y() / BASE_PX,
+            width: Math.max(0.05, re.width * node.scaleX()),
+            height: Math.max(0.05, re.height * node.scaleY()),
             rotation: node.rotation(),
           } as Partial<RectElement>)
-          node.x(0); node.y(0); node.scaleX(1); node.scaleY(1)
+          node.scaleX(1); node.scaleY(1)
         }}
-      >
-        <Rect
-          id={re.id}
-          x={re.x * BASE_PX} y={re.y * BASE_PX}
-          width={re.width * BASE_PX} height={re.height * BASE_PX}
-          rotation={re.rotation}
-          fill={resolvedFill(re.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
-        />
-        {re.label && <Text x={cx} y={cy} text={re.label} fontSize={11 / scale} fontFamily='sans-serif' fill='#374151' align='center' offsetX={re.label.length * 3 / scale} listening={false} />}
-      </Group>
-    )
+      />
+      {showLabel && <ShapeLabel text={re.label} x={cx} y={cy} scale={scale} />}
+    </>)
   }
+
   if (el.type === 'ellipse') {
     const ee = el as EllipseElement
-    return (
-      <Group id={ee.id} draggable={!ee.locked && !locked} onClick={onClick}
-        onDragEnd={(e) => { onDragEnd(ee.id, ee.x + e.target.x() / BASE_PX, ee.y + e.target.y() / BASE_PX); e.target.x(0); e.target.y(0) }}
+    return (<>
+      <Ellipse
+        {...common}
+        x={ee.x * BASE_PX} y={ee.y * BASE_PX} rotation={ee.rotation}
+        radiusX={ee.radiusX * BASE_PX} radiusY={ee.radiusY * BASE_PX}
+        fill={resolvedFill(ee.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
         onTransformEnd={(e) => {
-          const node = e.target as Konva.Node
-          useProjectStore.getState().updateElement(ee.id, {
-            x: (ee.x * BASE_PX + node.x()) / BASE_PX, y: (ee.y * BASE_PX + node.y()) / BASE_PX,
-            radiusX: Math.max(0.1, (ee.radiusX * BASE_PX * node.scaleX()) / BASE_PX),
-            radiusY: Math.max(0.1, (ee.radiusY * BASE_PX * node.scaleY()) / BASE_PX),
+          const node = e.target
+          update({
+            x: node.x() / BASE_PX, y: node.y() / BASE_PX,
+            radiusX: Math.max(0.05, ee.radiusX * node.scaleX()),
+            radiusY: Math.max(0.05, ee.radiusY * node.scaleY()),
             rotation: node.rotation(),
           } as Partial<EllipseElement>)
-          node.x(0); node.y(0); node.scaleX(1); node.scaleY(1)
+          node.scaleX(1); node.scaleY(1)
         }}
-      >
-        <Ellipse
-          id={ee.id}
-          x={ee.x * BASE_PX} y={ee.y * BASE_PX}
-          radiusX={ee.radiusX * BASE_PX} radiusY={ee.radiusY * BASE_PX}
-          rotation={ee.rotation}
-          fill={resolvedFill(ee.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
-        />
-        {ee.label && <Text x={ee.x * BASE_PX} y={ee.y * BASE_PX} text={ee.label} fontSize={11 / scale} fontFamily='sans-serif' fill='#374151' align='center' offsetX={ee.label.length * 3 / scale} listening={false} />}
-      </Group>
-    )
+      />
+      {showLabel && <ShapeLabel text={ee.label} x={ee.x * BASE_PX} y={ee.y * BASE_PX} scale={scale} />}
+    </>)
   }
+
   if (el.type === 'polygon') {
     const pe = el as PolygonElement
-    const pts = pe.points.map((v, i) => i % 2 === 0 ? v * BASE_PX + pe.x * BASE_PX : v * BASE_PX + pe.y * BASE_PX)
-    const cx = (Math.max(...pts.filter((_,i)=>i%2===0)) + Math.min(...pts.filter((_,i)=>i%2===0)))/2
-    const cy = (Math.max(...pts.filter((_,i)=>i%2!==0)) + Math.min(...pts.filter((_,i)=>i%2!==0)))/2
-    return (
-      <Group draggable={!pe.locked && !locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(pe.id, pe.x + dx, pe.y + dy); e.target.x(0); e.target.y(0) }}>
-        <Line id={pe.id} points={pts} closed fill={resolvedFill(pe.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw} />
-        {pe.label && <Text x={cx} y={cy} text={pe.label} fontSize={11/scale} fontFamily='sans-serif' fill='#374151' align='center' offsetX={pe.label.length*3/scale} listening={false} />}
-      </Group>
-    )
+    const pts = pe.points.map((v) => v * BASE_PX)
+    const xs = pts.filter((_, i) => i % 2 === 0)
+    const ys = pts.filter((_, i) => i % 2 === 1)
+    const rad = (pe.rotation * Math.PI) / 180
+    const lx = xs.length ? (Math.min(...xs) + Math.max(...xs)) / 2 : 0
+    const ly = ys.length ? (Math.min(...ys) + Math.max(...ys)) / 2 : 0
+    return (<>
+      <Line
+        {...common}
+        x={pe.x * BASE_PX} y={pe.y * BASE_PX} rotation={pe.rotation}
+        points={pts} closed
+        fill={resolvedFill(pe.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
+        onTransformEnd={(e) => {
+          const node = e.target
+          const sx = node.scaleX(), sy = node.scaleY()
+          update({
+            x: node.x() / BASE_PX, y: node.y() / BASE_PX,
+            points: pe.points.map((v, i) => (i % 2 === 0 ? v * sx : v * sy)),
+            rotation: node.rotation(),
+          } as Partial<PolygonElement>)
+          node.scaleX(1); node.scaleY(1)
+        }}
+      />
+      {showLabel && (
+        <ShapeLabel
+          text={pe.label}
+          x={pe.x * BASE_PX + lx * Math.cos(rad) - ly * Math.sin(rad)}
+          y={pe.y * BASE_PX + lx * Math.sin(rad) + ly * Math.cos(rad)}
+          scale={scale}
+        />
+      )}
+    </>)
   }
+
   if (el.type === 'truss') {
     const te = el as TrussElement
-    const x1 = te.x * BASE_PX; const y1 = te.y * BASE_PX
-    const x2 = te.x2 * BASE_PX; const y2 = te.y2 * BASE_PX
-    const cx = (x1 + x2) / 2; const cy = (y1 + y2) / 2
-    const length = Math.sqrt((te.x2 - te.x) ** 2 + (te.y2 - te.y) ** 2)
-    return (
-      <Group draggable={!te.locked && !locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(te.id, te.x + dx, te.y + dy); e.target.x(0); e.target.y(0) }}>
-        <Line points={[x1, y1, x2, y2]} stroke={stroke} strokeWidth={(selected ? 5 : 4) / scale} lineCap='round' hitStrokeWidth={20 / scale} />
-        {Array.from({ length: Math.floor(length / 0.5) + 1 }).map((_, i) => {
-          const t = (i * 0.5) / length; if (t > 1) return null
-          const hx = x1 + (x2 - x1) * t; const hy = y1 + (y2 - y1) * t
-          const angle = Math.atan2(y2 - y1, x2 - x1)
-          const dx = Math.sin(angle) * 4 / scale; const dy = -Math.cos(angle) * 4 / scale
+    // Geometry lives in the two endpoints, so the node carries no rotation of
+    // its own: a transform is baked straight back into the end point.
+    const ex = (te.x2 - te.x) * BASE_PX
+    const ey = (te.y2 - te.y) * BASE_PX
+    const length = Math.hypot(te.x2 - te.x, te.y2 - te.y)
+    const rungs = Math.min(400, Math.floor(length / 0.5))
+    const angle = Math.atan2(ey, ex)
+    const dx = Math.sin(angle) * 4 / scale
+    const dy = -Math.cos(angle) * 4 / scale
+    const caption = [vo.positionLabels && te.label, vo.positionLengths && `${length.toFixed(2)}m`]
+      .filter(Boolean).join('  ')
+    return (<>
+      <Group
+        {...common}
+        x={te.x * BASE_PX} y={te.y * BASE_PX}
+        onTransformEnd={(e) => {
+          const node = e.target
+          const rad = (node.rotation() * Math.PI) / 180
+          const cos = Math.cos(rad), sin = Math.sin(rad)
+          const sx = ex * node.scaleX(), sy = ey * node.scaleY()
+          update({
+            x: node.x() / BASE_PX, y: node.y() / BASE_PX,
+            x2: (node.x() + sx * cos - sy * sin) / BASE_PX,
+            y2: (node.y() + sx * sin + sy * cos) / BASE_PX,
+          } as Partial<TrussElement>)
+          node.rotation(0); node.scaleX(1); node.scaleY(1)
+        }}
+      >
+        <Line points={[0, 0, ex, ey]} stroke={stroke} strokeWidth={(selected ? 5 : 4) / scale}
+          lineCap='round' hitStrokeWidth={20 / scale} />
+        {Array.from({ length: rungs + 1 }).map((_, i) => {
+          const t = length > 0 ? (i * 0.5) / length : 0
+          if (t > 1) return null
+          const hx = ex * t, hy = ey * t
           return <Line key={i} points={[hx - dx, hy - dy, hx + dx, hy + dy]} stroke={stroke} strokeWidth={1.5 / scale} listening={false} />
         })}
-        <Text
-          x={cx} y={cy - 16 / scale}
-          text={[te.label, `${length.toFixed(2)}m`].filter(Boolean).join('  ')}
-          fontSize={9 / scale} fontFamily='monospace' fill='#374151'
-          align='center' offsetX={40 / scale} width={80 / scale} listening={false}
-        />
       </Group>
-    )
+      {caption && (
+        <ShapeLabel
+          text={caption}
+          x={te.x * BASE_PX + ex / 2}
+          y={te.y * BASE_PX + ey / 2 - 16 / scale}
+          scale={scale}
+        />
+      )}
+    </>)
   }
+
   if (el.type === 'cable') {
     const ce = el as CableElement
     const color = CABLE_COLORS[ce.cableType] ?? '#9ca3af'
-    const allPts = [
-      { x: ce.x, y: ce.y },
-      ...(ce.waypoints ?? []),
-      { x: ce.x2, y: ce.y2 },
+    const rel = [
+      { x: 0, y: 0 },
+      ...(ce.waypoints ?? []).map((p) => ({ x: p.x - ce.x, y: p.y - ce.y })),
+      { x: ce.x2 - ce.x, y: ce.y2 - ce.y },
     ]
-    const konvaPts = allPts.flatMap((p) => [p.x * BASE_PX, p.y * BASE_PX])
+    const pts = rel.flatMap((p) => [p.x * BASE_PX, p.y * BASE_PX])
     const length = cableLength(ce)
-    // Mid-point for label
-    const midIdx = Math.floor(allPts.length / 2)
-    const midP = allPts[midIdx]
-    return (
-      <Group draggable={!ce.locked && !locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(ce.id, ce.x + dx, ce.y + dy); e.target.x(0); e.target.y(0) }}>
-        <Line points={konvaPts} stroke={selected ? '#f97316' : color} strokeWidth={(selected ? 2.5 : 2) / scale} dash={[8 / scale, 4 / scale]} lineCap='round' lineJoin='round' hitStrokeWidth={16 / scale} />
-        {allPts.map((p, i) => (
-          <Circle key={i} x={p.x * BASE_PX} y={p.y * BASE_PX} radius={i === 0 || i === allPts.length - 1 ? 3 / scale : 2 / scale} fill={i > 0 && i < allPts.length - 1 ? 'white' : color} stroke={color} strokeWidth={1 / scale} listening={false} />
+    const mid = rel[Math.floor(rel.length / 2)]
+    const caption = [
+      vo.cableLabels && ce.autoLabel,
+      vo.cableLabels && ce.annotation,
+      vo.cableLengths && `${length.toFixed(1)}m`,
+    ].filter(Boolean).join(' · ')
+    return (<>
+      <Group
+        {...common}
+        x={ce.x * BASE_PX} y={ce.y * BASE_PX}
+        onTransformEnd={(e) => {
+          const node = e.target
+          const rad = (node.rotation() * Math.PI) / 180
+          const cos = Math.cos(rad), sin = Math.sin(rad)
+          const originX = node.x() / BASE_PX
+          const originY = node.y() / BASE_PX
+          const move = (p: { x: number; y: number }) => ({
+            x: originX + (p.x * cos - p.y * sin),
+            y: originY + (p.x * sin + p.y * cos),
+          })
+          const end = move(rel[rel.length - 1])
+          update({
+            x: originX, y: originY, x2: end.x, y2: end.y,
+            waypoints: rel.slice(1, -1).map(move),
+          } as Partial<CableElement>)
+          node.rotation(0); node.scaleX(1); node.scaleY(1)
+        }}
+      >
+        <Line points={pts} stroke={selected ? '#f97316' : color} strokeWidth={(selected ? 2.5 : 2) / scale}
+          dash={[8 / scale, 4 / scale]} lineCap='round' lineJoin='round' hitStrokeWidth={16 / scale} />
+        {rel.map((p, i) => (
+          <Circle key={i} x={p.x * BASE_PX} y={p.y * BASE_PX}
+            radius={i === 0 || i === rel.length - 1 ? 3 / scale : 2 / scale}
+            fill={i > 0 && i < rel.length - 1 ? 'white' : color} stroke={color} strokeWidth={1 / scale} listening={false} />
         ))}
-        <Text x={midP.x * BASE_PX + 3 / scale} y={midP.y * BASE_PX - 12 / scale}
-          text={[ce.autoLabel, ce.annotation, `${length.toFixed(1)}m`].filter(Boolean).join(' · ')}
-          fontSize={8 / scale} fontFamily='monospace' fill={color} listening={false} />
       </Group>
-    )
+      {caption && (
+        <Text
+          x={(ce.x + mid.x) * BASE_PX + 3 / scale} y={(ce.y + mid.y) * BASE_PX - 12 / scale}
+          text={caption} fontSize={8 / scale} fontFamily='monospace' fill={color} listening={false}
+        />
+      )}
+    </>)
   }
+
   if (el.type === 'text') {
     const txe = el as TextElement
+    // Font size is centimetres of real space, so text scales with the drawing.
+    const px = (txe.fontSize / 100) * BASE_PX
     return (
       <Text
-        id={txe.id}
-        x={txe.x * BASE_PX} y={txe.y * BASE_PX}
-        text={txe.text} fontSize={(txe.fontSize || 14) / scale}
-        fontFamily='sans-serif' fill={txe.fill || '#1f2937'}
-        rotation={txe.rotation}
-        draggable={!txe.locked && !locked} onClick={onClick}
-        onDragEnd={(e) => onDragEnd(txe.id, e.target.x() / BASE_PX, e.target.y() / BASE_PX)}
+        {...common}
+        x={txe.x * BASE_PX} y={txe.y * BASE_PX} rotation={txe.rotation}
+        text={txe.text} fontSize={px} fontFamily='sans-serif' fill={txe.fill || '#1f2937'}
+        stroke={selected ? '#f97316' : undefined} strokeWidth={selected ? 0.6 / scale : 0}
         onTransformEnd={(e) => {
-          const node = e.target as Konva.Text
-          useProjectStore.getState().updateElement(txe.id, {
-            x: node.x() / BASE_PX,
-            y: node.y() / BASE_PX,
-            fontSize: Math.max(6, (txe.fontSize || 14) * node.scaleX()),
+          const node = e.target
+          const factor = (Math.abs(node.scaleX()) + Math.abs(node.scaleY())) / 2
+          update({
+            x: node.x() / BASE_PX, y: node.y() / BASE_PX,
+            fontSize: Math.max(2, Math.round(txe.fontSize * factor)),
             rotation: node.rotation(),
           } as Partial<TextElement>)
           node.scaleX(1); node.scaleY(1)
@@ -302,6 +425,7 @@ function StageElementNode({ el, selected, scale, locked, onClick, onDragEnd }: {
       />
     )
   }
+
   return null
 }
 
@@ -325,8 +449,8 @@ function BackgroundImageLayer({ img }: { img: NonNullable<ReturnType<typeof useP
 
 // ── Distro node ───────────────────────────────────────────────
 
-function DistroNode({ distro, scale, activeTool, onCableClick, onSelectClick }: {
-  distro: Distro; scale: number; activeTool: string
+function DistroNode({ distro, scale, activeTool, selected, vo, onCableClick, onSelectClick }: {
+  distro: Distro; scale: number; activeTool: string; selected: boolean; vo: ViewOptions
   onCableClick: (d: Distro) => void
   onSelectClick: (d: Distro, shift: boolean) => void
 }) {
@@ -348,13 +472,14 @@ function DistroNode({ distro, scale, activeTool, onCableClick, onSelectClick }: 
           x: e.target.x() / BASE_PX,
           y: e.target.y() / BASE_PX,
         })
-        e.target.x(0); e.target.y(0)
       }}
     >
-      <Rect x={-W / 2} y={-H / 2} width={W} height={H} fill='#dc2626' stroke='#991b1b' strokeWidth={2 / scale} cornerRadius={3 / scale} />
-      <Text x={-W / 2 + 4 / scale} y={-H / 2 + 5 / scale} text={distro.name} width={W - 8 / scale} fontSize={8 / scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
-      <Text x={-W / 2 + 4 / scale} y={-H / 2 + 17 / scale} text={`${distro.incomingRating}A · ${distro.phases}Ø`} fontSize={7 / scale} fontFamily='monospace' fill='#fecaca' listening={false} />
-      <Text x={-W / 2 + 4 / scale} y={-H / 2 + 28 / scale} text={`${distro.circuits.length} way${distro.circuits.length !== 1 ? 's' : ''}`} fontSize={7 / scale} fontFamily='monospace' fill='#fecaca' listening={false} />
+      <Rect x={-W / 2} y={-H / 2} width={W} height={H} fill='#dc2626' stroke={selected ? '#f97316' : '#991b1b'} strokeWidth={(selected ? 3 : 2) / scale} cornerRadius={3 / scale} />
+      <Text x={-W / 2 + 4 / scale} y={-H / 2 + 5 / scale} text={distro.ref ? `${distro.ref} · ${distro.name}` : distro.name} width={W - 8 / scale} fontSize={8 / scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
+      {vo.deviceLabels && <>
+        <Text x={-W / 2 + 4 / scale} y={-H / 2 + 17 / scale} text={`${distro.incomingRating}A · ${distro.phases}Ø`} fontSize={7 / scale} fontFamily='monospace' fill='#fecaca' listening={false} />
+        <Text x={-W / 2 + 4 / scale} y={-H / 2 + 28 / scale} text={`${distro.circuits.length} way${distro.circuits.length !== 1 ? 's' : ''}`} fontSize={7 / scale} fontFamily='monospace' fill='#fecaca' listening={false} />
+      </>}
       {/* Power bolt icon */}
       <Text x={W / 2 - 16 / scale} y={-H / 2 + 4 / scale} text='⚡' fontSize={10 / scale} fill='rgba(255,255,255,0.6)' listening={false} />
     </Group>
@@ -384,8 +509,8 @@ const DEVICE_COLORS: Record<string, string> = {
   'other':         '#6b7280',
 }
 
-function DeviceNode({ device, scale, activeTool, selected, onSelectClick, onCableClick }: {
-  device: import('../../types').Device; scale: number; activeTool: string; selected: boolean
+function DeviceNode({ device, scale, activeTool, selected, vo, onSelectClick, onCableClick }: {
+  device: import('../../types').Device; scale: number; activeTool: string; selected: boolean; vo: ViewOptions
   onSelectClick: (d: import('../../types').Device, shift: boolean) => void
   onCableClick: (d: import('../../types').Device) => void
 }) {
@@ -403,12 +528,11 @@ function DeviceNode({ device, scale, activeTool, selected, onSelectClick, onCabl
       }}
       onDragEnd={(e) => {
         useProjectStore.getState().updateDevice(device.id, { x: e.target.x() / BASE_PX, y: e.target.y() / BASE_PX })
-        e.target.x(0); e.target.y(0)
       }}
     >
       <Rect x={-W/2} y={-H/2} width={W} height={H} fill={bgColor} stroke={selected ? '#f97316' : '#00000030'} strokeWidth={(selected ? 2.5 : 1.5) / scale} cornerRadius={3/scale} />
       <Text x={-W/2+4/scale} y={-H/2+4/scale} text={device.name} width={W-8/scale} fontSize={8/scale} fontFamily='monospace' fontStyle='bold' fill='white' listening={false} />
-      {device.manufacturer && <Text x={-W/2+4/scale} y={-H/2+16/scale} text={device.manufacturer} width={W-8/scale} fontSize={7/scale} fontFamily='monospace' fill='rgba(255,255,255,0.65)' listening={false} />}
+      {vo.deviceLabels && device.manufacturer && <Text x={-W/2+4/scale} y={-H/2+16/scale} text={device.manufacturer} width={W-8/scale} fontSize={7/scale} fontFamily='monospace' fill='rgba(255,255,255,0.65)' listening={false} />}
       <Text x={W/2-16/scale} y={-H/2+3/scale} text={DEVICE_ICONS[device.category] ?? '◻'} fontSize={10/scale} fill='rgba(255,255,255,0.5)' listening={false} />
     </Group>
   )
@@ -423,10 +547,15 @@ export default function PlotCanvas() {
   const [size, setSize] = useState({ width: 800, height: 600 })
 
   const {
-    project, activeTool, selectedIds, view, gridVisible, snapToGrid, gridSize,
-    activeLayerId, activeCableType, autoAddress, showUniverseColors, showScaleBar,
+    project, activeTool, selectedIds, view, viewOptions: vo,
+    activeLayerId, activeCableType, autoAddress,
     setView, setSelectedIds, addElement, updateElement, updateFixture, addFixture, selectedFixtureType,
+    setLabelDraftId,
   } = useProjectStore()
+  const { gridSize } = vo
+
+  // Alt held at pointer-down means "drag off a copy" rather than "move this".
+  const altDragRef = useRef(false)
 
   // Polygon drawing state
   const [polyPoints, setPolyPoints] = useState<{ x: number; y: number }[]>([])
@@ -468,14 +597,23 @@ export default function PlotCanvas() {
 
     tr.nodes(nodes)
 
-    // Full scale handles only for rects; rotation-only for everything else
+    // Handles that suit what the selected thing actually is.
+    const ALL_ANCHORS = ['top-left', 'top-right', 'bottom-left', 'bottom-right', 'top-center', 'bottom-center', 'middle-left', 'middle-right']
     const singleEl = selectedIds.length === 1
       ? project?.elements.find((e) => e.id === selectedIds[0])
       : null
-    if (singleEl?.type === 'rect' || singleEl?.type === 'ellipse') {
-      tr.enabledAnchors(['top-left', 'top-right', 'bottom-left', 'bottom-right', 'top-center', 'bottom-center', 'middle-left', 'middle-right'])
+    if (singleEl?.type === 'rect' || singleEl?.type === 'ellipse' || singleEl?.type === 'polygon') {
+      tr.enabledAnchors(ALL_ANCHORS)
+      tr.keepRatio(false)
+    } else if (singleEl?.type === 'text') {
+      tr.enabledAnchors(['top-left', 'top-right', 'bottom-left', 'bottom-right'])
+      tr.keepRatio(true)
+    } else if (singleEl?.type === 'truss') {
+      tr.enabledAnchors(['middle-left', 'middle-right'])
+      tr.keepRatio(false)
     } else {
       tr.enabledAnchors([])
+      tr.keepRatio(false)
     }
 
     tr.getLayer()?.batchDraw()
@@ -491,8 +629,11 @@ export default function PlotCanvas() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return
+      const target = e.target as HTMLElement
+      const tag = target.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return
+      // Space on a focused button should press it, not switch tools.
+      if ((e.key === ' ' || e.code === 'Space') && tag === 'BUTTON') return
       if (e.key === 'Delete' || e.key === 'Backspace') useProjectStore.getState().deleteSelected()
       if ((e.metaKey || e.ctrlKey) && e.key === 'c') {
         e.preventDefault()
@@ -508,6 +649,12 @@ export default function PlotCanvas() {
         else useProjectStore.getState().undo()
       }
       if (e.key === 'Escape') {
+        setPolyPoints([]); setCablePoints([]); setCalibPts([])
+        useProjectStore.getState().setActiveTool('select')
+      }
+      // Space drops back to the select tool — the fastest way out of a tool
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault()
         setPolyPoints([]); setCablePoints([]); setCalibPts([])
         useProjectStore.getState().setActiveTool('select')
       }
@@ -556,8 +703,19 @@ export default function PlotCanvas() {
         const { project: proj } = useProjectStore.getState()
         if (!proj) return
         const allX: number[] = [], allY: number[] = []
-        for (const f of proj.fixtures) { allX.push(f.x); allY.push(f.y) }
-        for (const el of proj.elements) { allX.push(el.x); allY.push(el.y) }
+        const add = (x: number, y: number) => { allX.push(x); allY.push(y) }
+        for (const f of proj.fixtures) add(f.x, f.y)
+        for (const d of proj.distros) if (d.x !== undefined && d.y !== undefined) add(d.x, d.y)
+        for (const d of proj.devices) if (d.x !== undefined && d.y !== undefined) add(d.x, d.y)
+        for (const el of proj.elements) {
+          add(el.x, el.y)
+          if (el.type === 'rect') add(el.x + el.width, el.y + el.height)
+          if (el.type === 'ellipse') { add(el.x - el.radiusX, el.y - el.radiusY); add(el.x + el.radiusX, el.y + el.radiusY) }
+          if (el.type === 'truss' || el.type === 'cable') add(el.x2, el.y2)
+          if (el.type === 'polygon') for (let i = 0; i < el.points.length; i += 2) add(el.x + el.points[i], el.y + el.points[i + 1])
+        }
+        const bg = proj.backgroundImage
+        if (bg && bg.visible !== false) { add(bg.x, bg.y); add(bg.x + bg.width, bg.y + bg.height) }
         if (allX.length === 0) return
         const pad = 3
         const minX = (Math.min(...allX) - pad) * BASE_PX
@@ -586,9 +744,28 @@ export default function PlotCanvas() {
   }, [view])
 
   const snap = useCallback((v: { x: number; y: number }) => ({
-    x: snapValue(v.x, gridSize, snapToGrid),
-    y: snapValue(v.y, gridSize, snapToGrid),
-  }), [gridSize, snapToGrid])
+    x: snapValue(v.x, gridSize, vo.snap),
+    y: snapValue(v.y, gridSize, vo.snap),
+  }), [gridSize, vo.snap])
+
+  /**
+   * Alt-drag duplicates: the copy is dropped at the original position and the
+   * node under the cursor keeps moving, so you end up with one of each.
+   */
+  const handleDragStart = useCallback((id: string) => {
+    if (!altDragRef.current) return
+    altDragRef.current = false
+    const state = useProjectStore.getState()
+    const proj = state.project
+    if (!proj) return
+    const el = proj.elements.find((e) => e.id === id)
+    if (el) { state.addElement({ ...el, id: generateId() }); return }
+    const fixture = proj.fixtures.find((f) => f.id === id)
+    if (fixture) {
+      const nextCh = Math.max(0, ...proj.fixtures.map((f) => f.channel)) + 1
+      state.addFixture({ ...fixture, id: generateId(), channel: nextCh })
+    }
+  }, [])
 
   // Layer visibility/lock helpers
   const layers = project?.layers ?? []
@@ -613,9 +790,29 @@ export default function PlotCanvas() {
     setView({ scale: newScale, x: pointer.x - mousePointTo.x * newScale, y: pointer.y - mousePointTo.y * newScale })
   }
 
+  /** Select a freshly drawn element and put the cursor in its label field. */
+  const selectAndName = (id: string) => {
+    setSelectedIds([id])
+    useProjectStore.getState().setActiveTool('select')
+    // Focus after the pointer is released: focusing during mousedown only gets
+    // undone by the click that follows it.
+    let done = false
+    const focusLabel = () => {
+      if (done) return
+      done = true
+      window.removeEventListener('pointerup', focusLabel)
+      setLabelDraftId(id)
+    }
+    window.addEventListener('pointerup', focusLabel, { once: true })
+    window.setTimeout(focusLabel, 300)
+  }
+
   const handleStageMouseDown = (e: KonvaEventObject<MouseEvent>) => {
     const isBackground = e.target === e.target.getStage() || e.target.name() === 'bg'
-    if (activeTool === 'pan' || e.evt.button === 1 || e.evt.altKey) {
+    // Alt over an object means duplicate-drag, so only pan with Alt over empty
+    // space — otherwise Alt-dragging a shape just panned the view instead.
+    altDragRef.current = e.evt.altKey && !isBackground
+    if (activeTool === 'pan' || e.evt.button === 1 || (e.evt.altKey && isBackground)) {
       setIsPanning(true)
       setPanStart({ x: e.evt.clientX, y: e.evt.clientY, vx: view.x, vy: view.y })
       return
@@ -632,13 +829,13 @@ export default function PlotCanvas() {
 
     if (activeTool === 'rect') {
       const id = generateId()
-      addElement({ id, type: 'rect', x: wp.x, y: wp.y, width: 4, height: 2, rotation: 0, locked: false, label: 'Stage', fill: '#d1d5db', stroke: '#374151', strokeWidth: 1, layerId: activeLayerId } as RectElement)
-      setSelectedIds([id]); useProjectStore.getState().setActiveTool('select')
+      addElement({ id, type: 'rect', x: wp.x, y: wp.y, width: 4, height: 2, rotation: 0, locked: false, label: '', fill: '#d1d5db', stroke: '#374151', strokeWidth: 1, layerId: activeLayerId } as RectElement)
+      selectAndName(id)
     }
     if (activeTool === 'ellipse') {
       const id = generateId()
       addElement({ id, type: 'ellipse', x: wp.x, y: wp.y, radiusX: 2, radiusY: 2, rotation: 0, locked: false, label: '', fill: '#d1d5db', stroke: '#374151', strokeWidth: 1, layerId: activeLayerId } as EllipseElement)
-      setSelectedIds([id]); useProjectStore.getState().setActiveTool('select')
+      selectAndName(id)
     }
     if (activeTool === 'polygon') {
       setPolyPoints((prev) => [...prev, wp])
@@ -646,13 +843,13 @@ export default function PlotCanvas() {
     if (activeTool === 'truss') {
       const id = generateId()
       addElement({ id, type: 'truss', x: wp.x, y: wp.y, x2: wp.x + 6, y2: wp.y, rotation: 0, locked: false, label: '', fill: '#374151', stroke: '#374151', strokeWidth: 2, layerId: activeLayerId } as TrussElement)
-      setSelectedIds([id]); useProjectStore.getState().setActiveTool('select')
+      selectAndName(id)
     }
     if (activeTool === 'text') {
       const text = window.prompt('Enter text:')
       if (!text) return
       const id = generateId()
-      addElement({ id, type: 'text', x: wp.x, y: wp.y, text, fontSize: 14, rotation: 0, locked: false, label: '', fill: '#1f2937', stroke: '', strokeWidth: 0, layerId: activeLayerId } as TextElement)
+      addElement({ id, type: 'text', x: wp.x, y: wp.y, text, fontSize: DEFAULT_TEXT_CM, rotation: 0, locked: false, label: '', fill: '#1f2937', stroke: '', strokeWidth: 0, layerId: activeLayerId } as TextElement)
       setSelectedIds([id]); useProjectStore.getState().setActiveTool('select')
     }
     if (activeTool === 'fixture' && selectedFixtureType) {
@@ -806,9 +1003,9 @@ export default function PlotCanvas() {
       const id = generateId()
       const fp = polyPoints[0]
       const relPts = polyPoints.flatMap((p) => [p.x - fp.x, p.y - fp.y])
-      addElement({ id, type: 'polygon', x: fp.x, y: fp.y, points: relPts, rotation: 0, locked: false, label: 'Stage', fill: '#d1d5db', stroke: '#374151', strokeWidth: 1, layerId: activeLayerId } as PolygonElement)
-      setPolyPoints([]); setSelectedIds([id])
-      useProjectStore.getState().setActiveTool('select')
+      addElement({ id, type: 'polygon', x: fp.x, y: fp.y, points: relPts, rotation: 0, locked: false, label: '', fill: '#d1d5db', stroke: '#374151', strokeWidth: 1, layerId: activeLayerId } as PolygonElement)
+      setPolyPoints([])
+      selectAndName(id)
     }
     if (activeTool === 'cable' && cablePoints.length >= 2) {
       const id = generateId()
@@ -878,7 +1075,7 @@ export default function PlotCanvas() {
           <Rect x={-view.x / view.scale} y={-view.y / view.scale} width={size.width / view.scale} height={size.height / view.scale} fill='white' name='bg' />
         </Layer>
 
-        {gridVisible && <GridLayer width={size.width} height={size.height} view={view} gridSize={gridSize} />}
+        {vo.grid && <GridLayer width={size.width} height={size.height} view={view} gridSize={gridSize} />}
 
         {project?.backgroundImage && <BackgroundImageLayer img={project.backgroundImage} />}
 
@@ -889,6 +1086,8 @@ export default function PlotCanvas() {
               selected={selectedIds.includes(el.id)}
               scale={view.scale}
               locked={isLocked(el.layerId)}
+              vo={vo}
+              onDragStart={handleDragStart}
               onClick={(e) => {
                 if (isLocked(el.layerId)) return
                 e.cancelBubble = true
@@ -904,8 +1103,10 @@ export default function PlotCanvas() {
               key={f.id} fixture={f}
               selected={selectedIds.includes(f.id)}
               scale={view.scale}
-              showUniverseColors={showUniverseColors}
+              vo={vo}
+              circuitRef={formatCircuitRef(project?.distros ?? [], f.circuitId)}
               draggable={activeTool === 'select' && !isLocked(f.layerId)}
+              onDragStart={handleDragStart}
               onClick={(e) => {
                 if (isLocked(f.layerId)) return
                 // When cable tool active, route the click to cable drawing
@@ -1031,6 +1232,8 @@ export default function PlotCanvas() {
               <DistroNode
                 key={d.id} distro={d} scale={view.scale}
                 activeTool={activeTool}
+                selected={selectedIds.includes(d.id)}
+                vo={vo}
                 onSelectClick={(distro, shift) => {
                   if (shift) setSelectedIds(selectedIds.includes(distro.id) ? selectedIds.filter((i) => i !== distro.id) : [...selectedIds, distro.id])
                   else setSelectedIds([distro.id])
@@ -1080,6 +1283,7 @@ export default function PlotCanvas() {
                   key={d.id} device={d} scale={view.scale}
                   activeTool={activeTool}
                   selected={selectedIds.includes(d.id)}
+                  vo={vo}
                   onSelectClick={(device, shift) => {
                     if (shift) setSelectedIds(selectedIds.includes(device.id) ? selectedIds.filter((i) => i !== device.id) : [...selectedIds, device.id])
                     else setSelectedIds([device.id])
@@ -1115,7 +1319,7 @@ export default function PlotCanvas() {
       </Stage>
 
       {/* Scale bar overlay */}
-      {showScaleBar && (() => {
+      {vo.scaleBar && (() => {
         const pxPerMetre = BASE_PX * view.scale
         const targets = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100]
         const chosenM = targets.find((m) => m * pxPerMetre >= 60) ?? targets[targets.length - 1]

@@ -16,9 +16,28 @@ import type {
   Device,
   FixtureGroup,
 } from '../types'
-import { DEFAULT_LAYERS, isPowerCable } from '../types'
+import { DEFAULT_LAYERS, DEFAULT_VIEW_OPTIONS, SCHEMA_VERSION, isPowerCable } from '../types'
+import type { ViewOptions } from '../types'
 
 const MAX_HISTORY = 50
+const VIEW_OPTIONS_KEY = 'prae-plot:view-options'
+const COALESCE_MS = 700
+
+// Tracks the last coalesced edit so a burst of them shares one undo step.
+let lastEditKey: string | null = null
+let lastEditAt = 0
+
+function loadViewOptions(): ViewOptions {
+  try {
+    const raw = localStorage.getItem(VIEW_OPTIONS_KEY)
+    if (raw) return { ...DEFAULT_VIEW_OPTIONS, ...(JSON.parse(raw) as Partial<ViewOptions>) }
+  } catch { /* storage unavailable */ }
+  return { ...DEFAULT_VIEW_OPTIONS }
+}
+
+function saveViewOptions(options: ViewOptions) {
+  try { localStorage.setItem(VIEW_OPTIONS_KEY, JSON.stringify(options)) } catch { /* quota */ }
+}
 const AUTOSAVE_KEY = 'prae-plot:autosave'
 const AUTOSAVE_TIME_KEY = 'prae-plot:autosave-time'
 
@@ -40,9 +59,7 @@ interface ProjectStore {
 
   // ── Canvas UI state ───────────────────────────────────────
   view: CanvasViewState
-  gridVisible: boolean
-  snapToGrid: boolean
-  gridSize: number
+  viewOptions: ViewOptions
 
   // ── Tool state ────────────────────────────────────────────
   activeTool: ToolType
@@ -56,7 +73,7 @@ interface ProjectStore {
   selectedFixtureType: GDTFFixtureType | null
 
   // ── UI panels ─────────────────────────────────────────────
-  activeLeftPanel: 'fixtures' | 'power' | 'layers' | 'settings' | 'cable' | 'groups' | 'devices' | null
+  activeLeftPanel: 'fixtures' | 'power' | 'layers' | 'view' | 'cable' | 'groups' | 'devices' | null
   activeRightPanel: 'properties' | 'circuits' | 'documents'
   projectInfoModalOpen: boolean
 
@@ -64,9 +81,10 @@ interface ProjectStore {
   clipboard: { elements: AnyElement[]; fixtures: PlacedFixture[] } | null
 
   // ── Canvas options ────────────────────────────────────────
-  showUniverseColors: boolean
-  showScaleBar: boolean
   lastAutosave: string | null
+
+  /** Element whose label the properties panel should focus next. */
+  labelDraftId: string | null
 
   // ── Actions: project lifecycle ────────────────────────────
   createProject: (info: ProjectInfo) => void
@@ -109,6 +127,7 @@ interface ProjectStore {
   undo: () => void
   redo: () => void
   pushHistory: () => void
+  pushHistoryCoalesced: (key: string) => void
 
   // ── Actions: clipboard ───────────────────────────────────
   copySelected: () => void
@@ -118,15 +137,12 @@ interface ProjectStore {
   setActiveTool: (tool: ToolType) => void
   setSelectedIds: (ids: string[]) => void
   setView: (view: Partial<CanvasViewState>) => void
-  setGridVisible: (v: boolean) => void
-  setSnapToGrid: (v: boolean) => void
-  setGridSize: (v: number) => void
+  setViewOption: <K extends keyof ViewOptions>(key: K, value: ViewOptions[K]) => void
+  setLabelDraftId: (id: string | null) => void
   setActiveLayerId: (id: string) => void
   setActiveCableType: (t: CableType) => void
   setAutoAddress: (v: boolean) => void
-  setShowUniverseColors: (v: boolean) => void
-  setShowScaleBar: (v: boolean) => void
-  setActiveLeftPanel: (p: 'fixtures' | 'power' | 'layers' | 'settings' | 'cable' | 'groups' | 'devices' | null) => void
+  setActiveLeftPanel: (p: 'fixtures' | 'power' | 'layers' | 'view' | 'cable' | 'groups' | 'devices' | null) => void
   setActiveRightPanel: (p: 'properties' | 'circuits' | 'documents') => void
   setProjectInfoModalOpen: (open: boolean) => void
 
@@ -152,6 +168,7 @@ function newProject(info: ProjectInfo): Project {
     id: generateId(),
     info,
     version: 10,
+    schemaVersion: SCHEMA_VERSION,
     layers: DEFAULT_LAYERS.map((l) => ({ ...l })),
     elements: [],
     fixtures: [],
@@ -177,9 +194,16 @@ function normaliseProject(p: Project): Project {
   const bg = p.backgroundImage
     ? { ...p.backgroundImage, visible: p.backgroundImage.visible ?? true, locked: p.backgroundImage.locked ?? false }
     : undefined
+  // Text used to be sized in screen pixels; it is now centimetres of real
+  // space so annotation scales with the drawing.
+  const textNeedsRescale = (p.schemaVersion ?? 1) < 2
   const elements = p.elements.map((el) => {
     if (el.type === 'cable' && !(el as { waypoints?: unknown }).waypoints) {
       return { ...el, waypoints: [] }
+    }
+    if (el.type === 'text' && textNeedsRescale) {
+      const te = el as import('../types').TextElement
+      return { ...te, fontSize: Math.round((te.fontSize || 14) * 2.5) }
     }
     return el
   }) as AnyElement[]
@@ -197,6 +221,7 @@ function normaliseProject(p: Project): Project {
   }
   return {
     ...p,
+    schemaVersion: SCHEMA_VERSION,
     layers,
     backgroundImage: bg,
     elements,
@@ -212,9 +237,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   past: [],
   future: [],
   view: { scale: 1, x: 80, y: 80 },
-  gridVisible: true,
-  snapToGrid: true,
-  gridSize: 1,
+  viewOptions: loadViewOptions(),
   activeTool: 'select',
   selectedIds: [],
   activeLayerId: 'lighting',
@@ -226,9 +249,8 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   activeRightPanel: 'properties',
   projectInfoModalOpen: false,
   clipboard: null,
-  showUniverseColors: false,
-  showScaleBar: true,
   lastAutosave: null,
+  labelDraftId: null,
 
   createProject: (info) => {
     set({ project: newProject(info), isDirty: false, past: [], future: [], selectedIds: [], activeLayerId: 'lighting' })
@@ -299,8 +321,26 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   pushHistory: () => {
     const { project, past } = get()
     if (!project) return
+    lastEditKey = null
     const newPast = [...past, snapshot(project)].slice(-MAX_HISTORY)
     set({ past: newPast, future: [] })
+  },
+
+  /**
+   * History for a stream of small edits to the same thing (dragging a slider,
+   * typing in a field): the first one takes a snapshot, the rest ride along.
+   */
+  pushHistoryCoalesced: (key) => {
+    const now = Date.now()
+    if (lastEditKey === key && now - lastEditAt < COALESCE_MS) {
+      lastEditAt = now
+      return
+    }
+    const { project, past } = get()
+    if (!project) return
+    lastEditKey = key
+    lastEditAt = now
+    set({ past: [...past, snapshot(project)].slice(-MAX_HISTORY), future: [] })
   },
 
   addElement: (el) => {
@@ -351,6 +391,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateElement: (id, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`element:${id}:${Object.keys(updates).join(',')}`)
     set({
       project: {
         ...project,
@@ -385,6 +426,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   updateFixture: (id, updates) => {
     const { project } = get()
     if (!project) return
+    get().pushHistoryCoalesced(`fixture:${id}:${Object.keys(updates).join(',')}`)
     set({
       project: {
         ...project,
@@ -580,6 +622,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   undo: () => {
     const { project, past, future } = get()
     if (!project || past.length === 0) return
+    lastEditKey = null
     const prev = past[past.length - 1]
     const current = snapshot(project)
     set({
@@ -593,6 +636,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   redo: () => {
     const { project, past, future } = get()
     if (!project || future.length === 0) return
+    lastEditKey = null
     const next = future[0]
     const current = snapshot(project)
     set({
@@ -644,58 +688,79 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   autoRepatch: (fixtureIds, startUniverse?: number, startAddress?: number) => {
     const { project } = get()
     if (!project) return
+    get().pushHistory()
 
-    // Helper: find the next free (universe, address) slot ignoring the fixtures being re-patched
-    const findNextFree = (excludeIds: string[]): { universe: number; address: number } => {
-      const others = project.fixtures.filter((f) => !excludeIds.includes(f.id))
-      // Build occupied ranges per universe
-      const occupied: Map<number, Array<[number, number]>> = new Map()
-      for (const f of others) {
-        const end = f.address + (f.channelCount || 1) - 1
-        if (!occupied.has(f.universe)) occupied.set(f.universe, [])
-        occupied.get(f.universe)!.push([f.address, end])
-      }
-      // Scan universes 1..n to find first gap
-      for (let u = 1; u <= 64; u++) {
-        const ranges = (occupied.get(u) ?? []).sort((a, b) => a[0] - b[0])
-        let addr = 1
-        for (const [start, end] of ranges) {
-          if (addr < start) return { universe: u, address: addr }
-          addr = Math.max(addr, end + 1)
-        }
-        if (addr <= 512) return { universe: u, address: addr }
-      }
-      return { universe: 1, address: 1 }
-    }
-
-    const sorted = project.fixtures
+    const selected = project.fixtures
       .filter((f) => fixtureIds.includes(f.id))
       .sort((a, b) => a.channel - b.channel)
+    if (selected.length === 0) return
 
-    let universe: number
-    let address: number
+    const others = project.fixtures.filter((f) => !fixtureIds.includes(f.id))
+    const patchMap = new Map<string, { universe: number; address: number }>()
+
+    /** Ranges already taken in a universe, including what we assign as we go. */
+    const taken = new Map<number, [number, number][]>()
+    for (const f of others) {
+      const width = Math.max(1, f.channelCount || 1)
+      const list = taken.get(f.universe) ?? []
+      list.push([f.address, f.address + width - 1])
+      taken.set(f.universe, list)
+    }
+    const claim = (universe: number, start: number, width: number) => {
+      const list = taken.get(universe) ?? []
+      list.push([start, start + width - 1])
+      taken.set(universe, list)
+    }
+    /** Lowest free address in `universe` that fits `width`, or null. */
+    const firstFit = (universe: number, width: number, from = 1): number | null => {
+      const ranges = [...(taken.get(universe) ?? [])].sort((a, b) => a[0] - b[0])
+      let addr = from
+      for (const [start, end] of ranges) {
+        if (end < addr) continue
+        if (addr + width - 1 < start) return addr
+        addr = Math.max(addr, end + 1)
+      }
+      return addr + width - 1 <= 512 ? addr : null
+    }
 
     if (startUniverse !== undefined && startAddress !== undefined) {
-      universe = startUniverse
-      address = startAddress
-    } else if (fixtureIds.length === 1) {
-      // Single fixture: place at next free slot (excluding itself)
-      const free = findNextFree(fixtureIds)
-      universe = free.universe
-      address = free.address
+      // Explicit start: pack forward from there, rolling into the next universe.
+      let universe = startUniverse
+      let address = startAddress
+      for (const f of selected) {
+        const width = Math.max(1, f.channelCount || 1)
+        if (address + width - 1 > 512) { universe++; address = 1 }
+        patchMap.set(f.id, { universe, address })
+        address += width
+      }
     } else {
-      // Multi: find next free slot after all currently patched fixtures, excluding selection
-      const free = findNextFree(fixtureIds)
-      universe = free.universe
-      address = free.address
+      // Default: repack each fixture inside the universe it is already on, so
+      // re-addressing never moves a rig onto a different universe behind your
+      // back. Only a universe with no room left spills into the next one.
+      const byUniverse = new Map<number, typeof selected>()
+      for (const f of selected) {
+        const list = byUniverse.get(f.universe) ?? []
+        list.push(f)
+        byUniverse.set(f.universe, list)
+      }
+      for (const [universe, list] of [...byUniverse.entries()].sort((a, b) => a[0] - b[0])) {
+        let cursor = 1
+        for (const f of list) {
+          const width = Math.max(1, f.channelCount || 1)
+          let target = universe
+          let address = firstFit(universe, width, cursor)
+          while (address === null) {
+            target += 1
+            address = firstFit(target, width)
+            if (target > 64) { address = 1; break }
+          }
+          patchMap.set(f.id, { universe: target, address: address ?? 1 })
+          claim(target, address ?? 1, width)
+          if (target === universe) cursor = (address ?? 1) + width
+        }
+      }
     }
 
-    const patchMap = new Map<string, { universe: number; address: number }>()
-    for (const f of sorted) {
-      patchMap.set(f.id, { universe, address })
-      address += f.channelCount || 1
-      if (address > 512) { universe++; address = 1 }
-    }
     set({
       project: {
         ...project,
@@ -709,7 +774,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   setActiveTool: (tool) => {
-    const extra: { activeLayerId?: string; activeLeftPanel?: 'fixtures' | 'power' | 'layers' | 'settings' | 'cable' | 'groups' | 'devices' | null } = {}
+    const extra: { activeLayerId?: string; activeLeftPanel?: 'fixtures' | 'power' | 'layers' | 'view' | 'cable' | 'groups' | 'devices' | null } = {}
     if (tool === 'cable') { extra.activeLayerId = 'cables'; extra.activeLeftPanel = 'cable' }
     // Auto-open fixture library when fixture tool activated
     if (tool === 'fixture' && get().activeLeftPanel !== 'fixtures') extra.activeLeftPanel = 'fixtures'
@@ -717,14 +782,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
   setSelectedIds: (ids) => set({ selectedIds: ids }),
   setView: (view) => set((s) => ({ view: { ...s.view, ...view } })),
-  setGridVisible: (v) => set({ gridVisible: v }),
-  setSnapToGrid: (v) => set({ snapToGrid: v }),
-  setGridSize: (v) => set({ gridSize: v }),
+  setViewOption: (key, value) =>
+    set((s) => {
+      const viewOptions = { ...s.viewOptions, [key]: value }
+      saveViewOptions(viewOptions)
+      return { viewOptions }
+    }),
+  setLabelDraftId: (id) => set({ labelDraftId: id }),
   setActiveLayerId: (id) => set({ activeLayerId: id }),
   setActiveCableType: (t) => set({ activeCableType: t }),
   setAutoAddress: (v) => set({ autoAddress: v }),
-  setShowUniverseColors: (v) => set({ showUniverseColors: v }),
-  setShowScaleBar: (v) => set({ showScaleBar: v }),
   setActiveLeftPanel: (p) => set({ activeLeftPanel: p }),
   setActiveRightPanel: (p) => set({ activeRightPanel: p }),
   setProjectInfoModalOpen: (open) => set({ projectInfoModalOpen: open }),
@@ -749,6 +816,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     }),
   setSelectedFixtureType: (ft) => set({ selectedFixtureType: ft }),
 }))
+
+// Dev-only handle so the app can be driven from the console or a browser test.
+if (import.meta.env.DEV) {
+  ;(window as unknown as { praePlotStore?: typeof useProjectStore }).praePlotStore = useProjectStore
+}
 
 // Hydrate GDTF library from localStorage on first load
 try {

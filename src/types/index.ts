@@ -144,8 +144,15 @@ export interface TrussElement extends BaseElement {
 export interface TextElement extends BaseElement {
   type: 'text'
   text: string
+  /**
+   * Cap height in centimetres of real space, so annotation scales with the
+   * drawing the way it does in CAD — not a screen pixel size.
+   */
   fontSize: number
 }
+
+/** Default height for new text annotations, in centimetres. */
+export const DEFAULT_TEXT_CM = 30
 
 export interface CableElement extends BaseElement {
   type: 'cable'
@@ -273,10 +280,15 @@ export interface ProjectInfo {
   clientLogo?: string
 }
 
+/** Bumped when the stored shape of a project changes; see normaliseProject. */
+export const SCHEMA_VERSION = 2
+
 export interface Project {
   id: string
   info: ProjectInfo
   version: number
+  /** Absent on projects saved before migrations existed. */
+  schemaVersion?: number
   backgroundImage?: BackgroundImage
   layers: Layer[]
   elements: AnyElement[]
@@ -294,6 +306,54 @@ export interface CanvasViewState {
   scale: number
   x: number
   y: number
+}
+
+/**
+ * Everything that controls what is drawn rather than what exists. The canvas
+ * reads these directly and the PDF export seeds its own options from them, so
+ * the sheet matches the screen.
+ */
+export interface ViewOptions {
+  // Canvas
+  grid: boolean
+  snap: boolean
+  gridSize: number
+  scaleBar: boolean
+  origin: boolean
+  // Fixtures
+  channels: boolean
+  addresses: boolean
+  fixtureLabels: boolean
+  circuitRefs: boolean
+  universeColors: boolean
+  // Cables
+  cableLabels: boolean
+  cableLengths: boolean
+  // Positions and shapes
+  positionLabels: boolean
+  positionLengths: boolean
+  elementLabels: boolean
+  // Equipment
+  deviceLabels: boolean
+}
+
+export const DEFAULT_VIEW_OPTIONS: ViewOptions = {
+  grid: true,
+  snap: true,
+  gridSize: 1,
+  scaleBar: true,
+  origin: true,
+  channels: true,
+  addresses: true,
+  fixtureLabels: true,
+  circuitRefs: false,
+  universeColors: false,
+  cableLabels: true,
+  cableLengths: true,
+  positionLabels: true,
+  positionLengths: true,
+  elementLabels: true,
+  deviceLabels: true,
 }
 
 // ── Cable metadata ────────────────────────────────────────────

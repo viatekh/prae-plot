@@ -1,6 +1,7 @@
+import { useEffect, useRef } from 'react'
 import { useProjectStore, computeCircuitLoad, circuitCapacityW, formatCircuitRef, findAddressConflicts, computeDistroLoad } from '../../store/projectStore'
 import type { AnyElement, PlacedFixture, RectElement, EllipseElement, TrussElement, TextElement, CableElement, CableType, Distro, Device } from '../../types'
-import { CABLE_COLORS, CABLE_LABELS, CABLE_GROUPS } from '../../types'
+import { CABLE_COLORS, CABLE_LABELS, CABLE_GROUPS, DEFAULT_TEXT_CM } from '../../types'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -11,11 +12,21 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-function Input({ value, onChange, type = 'text' }: { value: string | number; onChange: (v: string) => void; type?: string }) {
+function Input({ value, onChange, type = 'text', autoFocus, placeholder }: {
+  value: string | number; onChange: (v: string) => void; type?: string; autoFocus?: boolean; placeholder?: string
+}) {
+  const ref = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (!autoFocus) return
+    ref.current?.focus()
+    ref.current?.select()
+  }, [autoFocus])
   return (
     <input
+      ref={ref}
       type={type}
       value={value}
+      placeholder={placeholder}
       onChange={(e) => onChange(e.target.value)}
       className='w-full text-sm border border-gray-200 rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500'
     />
@@ -35,8 +46,15 @@ function Select({ value, onChange, children }: { value: string | number; onChang
 }
 
 function ElementProperties({ el }: { el: AnyElement }) {
-  const { updateElement, project } = useProjectStore()
+  const { updateElement, project, labelDraftId, setLabelDraftId } = useProjectStore()
   const upd = (updates: Partial<AnyElement>) => updateElement(el.id, updates)
+
+  // A shape drawn on the canvas arrives here with its label field focused, so
+  // you can name it without reaching for the mouse again.
+  const namingThis = labelDraftId === el.id
+  useEffect(() => {
+    if (namingThis) setLabelDraftId(null)
+  }, [namingThis, setLabelDraftId])
   const allFixtures = project?.fixtures ?? []
   const allDistros = project?.distros ?? []
   const allDevices = project?.devices ?? []
@@ -58,7 +76,12 @@ function ElementProperties({ el }: { el: AnyElement }) {
       </div>
 
       <Field label='Label'>
-        <Input value={el.label} onChange={(v) => upd({ label: v })} />
+        <Input
+          value={el.label}
+          onChange={(v) => upd({ label: v })}
+          autoFocus={namingThis}
+          placeholder={el.type === 'truss' ? 'Position name, e.g. FOH' : 'Name this shape'}
+        />
       </Field>
 
       {el.type === 'rect' && (
@@ -184,8 +207,8 @@ function ElementProperties({ el }: { el: AnyElement }) {
               onChange={(e) => upd({ text: e.target.value } as Partial<TextElement>)}
             />
           </Field>
-          <Field label='Font size (pt)'>
-            <Input type='number' value={(el as TextElement).fontSize} onChange={(v) => upd({ fontSize: parseInt(v) || 14 } as Partial<TextElement>)} />
+          <Field label='Text height (cm)'>
+            <Input type='number' value={(el as TextElement).fontSize} onChange={(v) => upd({ fontSize: Math.max(2, parseInt(v) || DEFAULT_TEXT_CM) } as Partial<TextElement>)} />
           </Field>
         </>
       )}
