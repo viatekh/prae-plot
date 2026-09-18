@@ -3,12 +3,14 @@ import { Stage, Layer, Rect, Ellipse, Line, Circle, Text, Image as KonvaImage, G
 import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
 import { useProjectStore } from '../../store/projectStore'
-import { generateId } from '../../lib/utils'
+import { generateId, cableLength } from '../../lib/utils'
 import type {
   AnyElement, PlacedFixture, RectElement, EllipseElement, PolygonElement, TrussElement, TextElement, CableElement, Distro,
 } from '../../types'
 import { CABLE_COLORS } from '../../types'
-import { SYMBOL_RADIUS, defaultSymbolColors } from '../../lib/symbols'
+import { SYMBOL_RADIUS, symbolColors } from '../../lib/symbols'
+import { symbolShapes, symbolLineWidth } from '../../lib/symbolGeometry'
+import type { FillRole } from '../../lib/symbolGeometry'
 
 const BASE_PX = 50
 const MIN_SCALE = 0.1
@@ -16,12 +18,6 @@ const MAX_SCALE = 8
 const CABLE_SNAP_RADIUS = 0.6 // metres
 
 const UNIVERSE_COLORS = ['#3b82f6', '#22c55e', '#f59e0b', '#ef4444', '#a855f7', '#06b6d4', '#f97316', '#84cc16']
-
-// Module-level ref so EditorPage can grab the stage image without prop-drilling
-let _getStageDataURL: (() => string) | null = null
-export function getPlotDataURL(): string {
-  return _getStageDataURL?.() ?? ''
-}
 
 function snapValue(v: number, grid: number, snap: boolean): number {
   if (!snap) return v
@@ -84,7 +80,7 @@ function FixtureSymbol({ fixture, selected, scale, showUniverseColors, draggable
   onClick: (e: KonvaEventObject<MouseEvent>) => void
   onDragEnd: (id: string, x: number, y: number) => void
 }) {
-  const colors = defaultSymbolColors[fixture.symbol]
+  const colors = symbolColors(fixture.symbol)
   const r = SYMBOL_RADIUS / scale
   const strokeColor = selected ? '#f97316' : colors.stroke
   const x = fixture.x * BASE_PX
@@ -93,101 +89,33 @@ function FixtureSymbol({ fixture, selected, scale, showUniverseColors, draggable
   const addrLabel = `${fixture.universe}.${String(fixture.address).padStart(3, '0')}`
 
   // ── Theatrical / architectural symbols ──────────────────────────────────────
-  // Conventions matching industry standard (Capture/Vectorworks/Cast):
-  //   White fill = fixture body (clean, readable)
-  //   Thick outer circle = housing
-  //   Inner geometry = fixture type identifier
-  //   Beam direction = upward (rotated by fixture.rotation)
-  const renderBody = () => {
-    const lw  = 1.2 / scale   // body line weight
-    const lw2 = 2.0 / scale   // housing outline
-    const white = '#ffffff'
-    const accent = strokeColor  // selected = orange, normal = type colour
+  // Geometry comes from lib/symbolGeometry so the canvas and the PDF plot
+  // renderer draw exactly the same symbols. Coordinates there are in multiples
+  // of the symbol radius, with the beam pointing "up" (−y).
+  const renderBody = () =>
+    symbolShapes(fixture.symbol).map((p, i) => {
+      const paint = (role?: FillRole) =>
+        role === 'body'   ? '#ffffff'
+        : role === 'accent' ? strokeColor
+        : role === 'tint'   ? colors.fill + '55'
+        : role === 'type'   ? colors.fill
+        : 'transparent'
+      const sw = p.lw === undefined ? symbolLineWidth(1) : symbolLineWidth(p.lw)
+      const stroke = sw > 0 ? strokeColor : undefined
+      const strokeWidth = sw / scale
 
-    switch (fixture.symbol) {
-
-      // MOVING HEAD WASH — bullseye: thick outer ring, inner ring, 4 radial ticks
-      case 'wash': return (<>
-        <Circle radius={r} fill={white} stroke={accent} strokeWidth={lw2} />
-        <Circle radius={r * 0.52} fill={colors.fill + '55'} stroke={accent} strokeWidth={lw} />
-        <Circle radius={r * 0.18} fill={accent} />
-        {[0, 90, 180, 270].map((a) => {
-          const rad = a * Math.PI / 180
-          return <Line key={a}
-            points={[Math.cos(rad)*r*0.56, Math.sin(rad)*r*0.56,
-                     Math.cos(rad)*r*0.92, Math.sin(rad)*r*0.92]}
-            stroke={accent} strokeWidth={lw} />
-        })}
-      </>)
-
-      // MOVING HEAD SPOT — circle + full crosshair + beam triangle
-      case 'spot': return (<>
-        <Circle radius={r} fill={white} stroke={accent} strokeWidth={lw2} />
-        {/* Cross inside (gobo slot) */}
-        <Line points={[-r*0.7, 0, r*0.7, 0]} stroke={accent} strokeWidth={lw} />
-        <Line points={[0, -r*0.7, 0, r*0.7]} stroke={accent} strokeWidth={lw} />
-        {/* Beam triangle above (direction indicator) */}
-        <Line points={[-r*0.55, -r*0.85, 0, -r*1.85, r*0.55, -r*0.85]}
-          closed fill={colors.fill + '44'} stroke={accent} strokeWidth={lw} />
-      </>)
-
-      // MOVING HEAD BEAM — small tight circle + narrow converging beam lines
-      case 'beam': return (<>
-        <Circle radius={r * 0.62} fill={white} stroke={accent} strokeWidth={lw2} />
-        <Circle radius={r * 0.22} fill={accent} />
-        {/* Narrow beam — lines converge to a point above */}
-        <Line points={[-r*0.42, -r*0.62, 0, -r*2.1, r*0.42, -r*0.62]}
-          stroke={accent} strokeWidth={lw} />
-        <Line points={[-r*0.42, -r*0.62, r*0.42, -r*0.62]}
-          stroke={accent} strokeWidth={lw} />
-      </>)
-
-      // PAR CAN — circle with 3 horizontal hatch lines (parabolic reflector lines)
-      case 'par': return (<>
-        <Circle radius={r} fill={white} stroke={accent} strokeWidth={lw2} />
-        {([-0.42, 0, 0.42] as number[]).map((yOff) => {
-          const hw = Math.sqrt(Math.max(0, r*r - (yOff*r)**2)) * 0.85
-          return <Line key={yOff} points={[-hw, yOff*r, hw, yOff*r]} stroke={accent} strokeWidth={lw} />
-        })}
-      </>)
-
-      // STROBE / BLINDER — wide flat rectangle, 3 vertical flash lines
-      case 'strobe': return (<>
-        <Rect x={-r*1.15} y={-r*0.52} width={r*2.3} height={r*1.04}
-          fill={white} stroke={accent} strokeWidth={lw2} cornerRadius={2/scale} />
-        {([-r*0.42, 0, r*0.42] as number[]).map((xOff) => (
-          <Line key={xOff} points={[xOff, -r*0.28, xOff, r*0.28]}
-            stroke={accent} strokeWidth={lw2} />
-        ))}
-      </>)
-
-      // FRESNEL / FLOOD — circle with concentric ring + wide trapezoid beam
-      case 'flood': return (<>
-        <Circle radius={r} fill={white} stroke={accent} strokeWidth={lw2} />
-        <Circle radius={r*0.48} fill={colors.fill + '44'} stroke={accent} strokeWidth={lw} />
-        {/* Wide beam trapezoid above */}
-        <Line points={[-r*0.72, -r*0.9, -r*1.6, -r*2.1, r*1.6, -r*2.1, r*0.72, -r*0.9]}
-          stroke={accent} strokeWidth={lw} fill='transparent' />
-      </>)
-
-      // LED PIXEL BAR — thin horizontal rectangle, evenly spaced dots
-      case 'pixel': return (<>
-        <Rect x={-r*1.6} y={-r*0.48} width={r*3.2} height={r*0.96}
-          fill={white} stroke={accent} strokeWidth={lw2} cornerRadius={2/scale} />
-        {([-1.05, -0.35, 0.35, 1.05] as number[]).map((xOff) => (
-          <Circle key={xOff} x={xOff*r} radius={3/scale}
-            fill={colors.fill} stroke={accent} strokeWidth={0.5/scale} />
-        ))}
-      </>)
-
-      // OTHER — circle with X
-      default: return (<>
-        <Circle radius={r} fill={white} stroke={accent} strokeWidth={lw2} />
-        <Line points={[-r*0.55, -r*0.55, r*0.55, r*0.55]} stroke={accent} strokeWidth={lw} />
-        <Line points={[ r*0.55, -r*0.55,-r*0.55, r*0.55]} stroke={accent} strokeWidth={lw} />
-      </>)
-    }
-  }
+      if (p.k === 'circle') {
+        return <Circle key={i} x={(p.cx ?? 0) * r} y={(p.cy ?? 0) * r} radius={p.r * r}
+          fill={paint(p.fill)} stroke={stroke} strokeWidth={strokeWidth} />
+      }
+      if (p.k === 'rect') {
+        return <Rect key={i} x={p.x * r} y={p.y * r} width={p.w * r} height={p.h * r}
+          cornerRadius={(p.radius ?? 0) * r}
+          fill={paint(p.fill)} stroke={stroke} strokeWidth={strokeWidth} />
+      }
+      return <Line key={i} points={p.pts.map((v) => v * r)} closed={p.closed}
+        fill={paint(p.fill)} stroke={stroke} strokeWidth={strokeWidth} lineJoin='round' />
+    })
 
   return (
     <Group
@@ -204,20 +132,24 @@ function FixtureSymbol({ fixture, selected, scale, showUniverseColors, draggable
       {renderBody()}
       {/* Universe color ring */}
       {showUniverseColors && <Circle radius={r + 4 / scale} fill='transparent' stroke={UNIVERSE_COLORS[(fixture.universe - 1) % UNIVERSE_COLORS.length]} strokeWidth={2 / scale} listening={false} />}
-      {/* CH above symbol */}
-      {fixture.channel > 0 && <Text x={-22 / scale} y={-r - 18 / scale} width={44 / scale} text={String(fixture.channel)} fontSize={10 / scale} fontFamily='monospace' fill='#1f2937' fontStyle='bold' align='center' listening={false} />}
-      {/* DMX address below symbol */}
-      <Text x={-26 / scale} y={r + 3 / scale} width={52 / scale} text={addrLabel} fontSize={8 / scale} fontFamily='monospace' fill='#6b7280' align='center' listening={false} />
-      {/* Label further below */}
-      {fixture.label && <Text x={-26 / scale} y={r + 14 / scale} width={52 / scale} text={fixture.label} fontSize={8 / scale} fontFamily='monospace' fill='#374151' align='center' listening={false} />}
+      {/* Annotations counter-rotate so they stay upright whichever way the
+          fixture points — a plot label is read off the page, not the symbol. */}
+      <Group rotation={-fixture.rotation} listening={false}>
+        {/* CH above symbol */}
+        {fixture.channel > 0 && <Text x={-22 / scale} y={-r - 18 / scale} width={44 / scale} text={String(fixture.channel)} fontSize={10 / scale} fontFamily='monospace' fill='#1f2937' fontStyle='bold' align='center' listening={false} />}
+        {/* DMX address below symbol */}
+        <Text x={-26 / scale} y={r + 3 / scale} width={52 / scale} text={addrLabel} fontSize={8 / scale} fontFamily='monospace' fill='#6b7280' align='center' listening={false} />
+        {/* Label further below */}
+        {fixture.label && <Text x={-26 / scale} y={r + 14 / scale} width={52 / scale} text={fixture.label} fontSize={8 / scale} fontFamily='monospace' fill='#374151' align='center' listening={false} />}
+      </Group>
     </Group>
   )
 }
 
 // ── Stage element ─────────────────────────────────────────────
 
-function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
-  el: AnyElement; selected: boolean; scale: number
+function StageElementNode({ el, selected, scale, locked, onClick, onDragEnd }: {
+  el: AnyElement; selected: boolean; scale: number; locked: boolean
   onClick: (e: KonvaEventObject<MouseEvent>) => void
   onDragEnd: (id: string, x: number, y: number) => void
 }) {
@@ -233,7 +165,7 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
     const cx = re.x * BASE_PX + (re.width * BASE_PX) / 2
     const cy = re.y * BASE_PX + (re.height * BASE_PX) / 2
     return (
-      <Group id={re.id} rotation={re.rotation} x={0} y={0} draggable={!re.locked} onClick={onClick}
+      <Group id={re.id} x={0} y={0} draggable={!re.locked && !locked} onClick={onClick}
         onDragEnd={(e) => { onDragEnd(re.id, re.x + e.target.x() / BASE_PX, re.y + e.target.y() / BASE_PX); e.target.x(0); e.target.y(0) }}
         onTransformEnd={(e) => {
           const node = e.target as Konva.Node
@@ -260,7 +192,7 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
   if (el.type === 'ellipse') {
     const ee = el as EllipseElement
     return (
-      <Group id={ee.id} draggable={!ee.locked} onClick={onClick}
+      <Group id={ee.id} draggable={!ee.locked && !locked} onClick={onClick}
         onDragEnd={(e) => { onDragEnd(ee.id, ee.x + e.target.x() / BASE_PX, ee.y + e.target.y() / BASE_PX); e.target.x(0); e.target.y(0) }}
         onTransformEnd={(e) => {
           const node = e.target as Konva.Node
@@ -290,7 +222,7 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
     const cx = (Math.max(...pts.filter((_,i)=>i%2===0)) + Math.min(...pts.filter((_,i)=>i%2===0)))/2
     const cy = (Math.max(...pts.filter((_,i)=>i%2!==0)) + Math.min(...pts.filter((_,i)=>i%2!==0)))/2
     return (
-      <Group draggable={!pe.locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(pe.id, pe.x + dx, pe.y + dy); e.target.x(0); e.target.y(0) }}>
+      <Group draggable={!pe.locked && !locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(pe.id, pe.x + dx, pe.y + dy); e.target.x(0); e.target.y(0) }}>
         <Line id={pe.id} points={pts} closed fill={resolvedFill(pe.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw} />
         {pe.label && <Text x={cx} y={cy} text={pe.label} fontSize={11/scale} fontFamily='sans-serif' fill='#374151' align='center' offsetX={pe.label.length*3/scale} listening={false} />}
       </Group>
@@ -303,7 +235,7 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
     const cx = (x1 + x2) / 2; const cy = (y1 + y2) / 2
     const length = Math.sqrt((te.x2 - te.x) ** 2 + (te.y2 - te.y) ** 2)
     return (
-      <Group draggable={!te.locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(te.id, te.x + dx, te.y + dy); e.target.x(0); e.target.y(0) }}>
+      <Group draggable={!te.locked && !locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(te.id, te.x + dx, te.y + dy); e.target.x(0); e.target.y(0) }}>
         <Line points={[x1, y1, x2, y2]} stroke={stroke} strokeWidth={(selected ? 5 : 4) / scale} lineCap='round' hitStrokeWidth={20 / scale} />
         {Array.from({ length: Math.floor(length / 0.5) + 1 }).map((_, i) => {
           const t = (i * 0.5) / length; if (t > 1) return null
@@ -312,8 +244,12 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
           const dx = Math.sin(angle) * 4 / scale; const dy = -Math.cos(angle) * 4 / scale
           return <Line key={i} points={[hx - dx, hy - dy, hx + dx, hy + dy]} stroke={stroke} strokeWidth={1.5 / scale} listening={false} />
         })}
-        <Text x={cx + 5 / scale} y={cy - 14 / scale} text={`${length.toFixed(2)}m`} fontSize={9 / scale} fontFamily='monospace' fill='#374151' listening={false} />
-        {te.label && <Text x={cx + 5 / scale} y={cy + 2 / scale} text={te.label} fontSize={9 / scale} fontFamily='monospace' fill='#374151' listening={false} />}
+        <Text
+          x={cx} y={cy - 16 / scale}
+          text={[te.label, `${length.toFixed(2)}m`].filter(Boolean).join('  ')}
+          fontSize={9 / scale} fontFamily='monospace' fill='#374151'
+          align='center' offsetX={40 / scale} width={80 / scale} listening={false}
+        />
       </Group>
     )
   }
@@ -326,17 +262,12 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
       { x: ce.x2, y: ce.y2 },
     ]
     const konvaPts = allPts.flatMap((p) => [p.x * BASE_PX, p.y * BASE_PX])
-    // Total length — manual override or sum of segment distances
-    let drawnLength = 0
-    for (let i = 1; i < allPts.length; i++) {
-      drawnLength += Math.sqrt((allPts[i].x - allPts[i - 1].x) ** 2 + (allPts[i].y - allPts[i - 1].y) ** 2)
-    }
-    const length = ce.manualLength ?? drawnLength
+    const length = cableLength(ce)
     // Mid-point for label
     const midIdx = Math.floor(allPts.length / 2)
     const midP = allPts[midIdx]
     return (
-      <Group draggable={!ce.locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(ce.id, ce.x + dx, ce.y + dy); e.target.x(0); e.target.y(0) }}>
+      <Group draggable={!ce.locked && !locked} onClick={onClick} onDragEnd={(e) => { const dx = e.target.x() / BASE_PX; const dy = e.target.y() / BASE_PX; onDragEnd(ce.id, ce.x + dx, ce.y + dy); e.target.x(0); e.target.y(0) }}>
         <Line points={konvaPts} stroke={selected ? '#f97316' : color} strokeWidth={(selected ? 2.5 : 2) / scale} dash={[8 / scale, 4 / scale]} lineCap='round' lineJoin='round' hitStrokeWidth={16 / scale} />
         {allPts.map((p, i) => (
           <Circle key={i} x={p.x * BASE_PX} y={p.y * BASE_PX} radius={i === 0 || i === allPts.length - 1 ? 3 / scale : 2 / scale} fill={i > 0 && i < allPts.length - 1 ? 'white' : color} stroke={color} strokeWidth={1 / scale} listening={false} />
@@ -356,7 +287,7 @@ function StageElementNode({ el, selected, scale, onClick, onDragEnd }: {
         text={txe.text} fontSize={(txe.fontSize || 14) / scale}
         fontFamily='sans-serif' fill={txe.fill || '#1f2937'}
         rotation={txe.rotation}
-        draggable={!txe.locked} onClick={onClick}
+        draggable={!txe.locked && !locked} onClick={onClick}
         onDragEnd={(e) => onDragEnd(txe.id, e.target.x() / BASE_PX, e.target.y() / BASE_PX)}
         onTransformEnd={(e) => {
           const node = e.target as Konva.Text
@@ -383,7 +314,7 @@ function BackgroundImageLayer({ img }: { img: NonNullable<ReturnType<typeof useP
     const i = new window.Image()
     i.src = img.src
     i.onload = () => setKonvaImg(i)
-  }, [img?.src])
+  }, [img])
   if (!img || !konvaImg || img.visible === false) return null
   return (
     <Layer listening={false}>
@@ -493,7 +424,7 @@ export default function PlotCanvas() {
 
   const {
     project, activeTool, selectedIds, view, gridVisible, snapToGrid, gridSize,
-    activeLayerId, activeCableType, autoAddress, showUniverseColors,
+    activeLayerId, activeCableType, autoAddress, showUniverseColors, showScaleBar,
     setView, setSelectedIds, addElement, updateElement, updateFixture, addFixture, selectedFixtureType,
   } = useProjectStore()
 
@@ -515,12 +446,6 @@ export default function PlotCanvas() {
   const [snapTarget, setSnapTarget] = useState<{ id: string; x: number; y: number } | null>(null)
   // Track start/end connections for current cable
   const cableConnections = useRef<{ start?: string; end?: string }>({})
-
-  // Register the stage data URL getter so EditorPage can export
-  useEffect(() => {
-    _getStageDataURL = () => stageRef.current?.toDataURL({ pixelRatio: 2 }) ?? ''
-    return () => { _getStageDataURL = null }
-  }, [])
 
   useEffect(() => {
     const container = containerRef.current
@@ -835,7 +760,7 @@ export default function PlotCanvas() {
     // Cable snap to fixture/distro
     if (activeTool === 'cable') {
       let snapped: { id: string; x: number; y: number } | null = null
-      for (const f of visibleFixtures) {
+      for (const f of selectableFixtures) {
         const d = Math.hypot(wp.x - f.x, wp.y - f.y)
         if (d < CABLE_SNAP_RADIUS) { snapped = { id: f.id, x: f.x, y: f.y }; break }
       }
@@ -868,15 +793,15 @@ export default function PlotCanvas() {
       const minY = Math.min(selectBox.y1, selectBox.y2)
       const maxY = Math.max(selectBox.y1, selectBox.y2)
       const inBox = (x: number, y: number) => x >= minX && x <= maxX && y >= minY && y <= maxY
-      const selEl = visibleElements.filter((el) => inBox(el.x, el.y)).map((el) => el.id)
-      const selFx = visibleFixtures.filter((f) => inBox(f.x, f.y)).map((f) => f.id)
+      const selEl = selectableElements.filter((el) => inBox(el.x, el.y)).map((el) => el.id)
+      const selFx = selectableFixtures.filter((f) => inBox(f.x, f.y)).map((f) => f.id)
       if (selEl.length + selFx.length > 0) setSelectedIds([...selEl, ...selFx])
       setSelectBox(null)
     }
     rubberStart.current = null
   }
 
-  const handleStageDblClick = (_e: KonvaEventObject<MouseEvent>) => {
+  const handleStageDblClick = () => {
     if (activeTool === 'polygon' && polyPoints.length >= 3) {
       const id = generateId()
       const fp = polyPoints[0]
@@ -910,8 +835,19 @@ export default function PlotCanvas() {
     }
   }
 
-  const visibleElements = (project?.elements ?? []).filter((el) => isVisible(el.layerId) && !isLocked(el.layerId))
-  const visibleFixtures = (project?.fixtures ?? []).filter((f) => isVisible(f.layerId) && !isLocked(f.layerId))
+  // Visible items still render when their layer is locked — locking only stops
+  // them being selected or dragged, it does not hide them.
+  const layerRank = (layerId?: string) => layerMap[layerId ?? '']?.order ?? -1
+  const byLayerOrder = <T extends { layerId?: string }>(items: T[]): T[] =>
+    items
+      .map((item, i) => ({ item, i }))
+      .sort((a, b) => layerRank(a.item.layerId) - layerRank(b.item.layerId) || a.i - b.i)
+      .map(({ item }) => item)
+
+  const visibleElements = byLayerOrder((project?.elements ?? []).filter((el) => isVisible(el.layerId)))
+  const visibleFixtures = byLayerOrder((project?.fixtures ?? []).filter((f) => isVisible(f.layerId)))
+  const selectableElements = visibleElements.filter((el) => !isLocked(el.layerId))
+  const selectableFixtures = visibleFixtures.filter((f) => !isLocked(f.layerId))
 
   const cursor =
     activeTool === 'pan' || isPanning ? 'grab'
@@ -952,6 +888,7 @@ export default function PlotCanvas() {
               key={el.id} el={el}
               selected={selectedIds.includes(el.id)}
               scale={view.scale}
+              locked={isLocked(el.layerId)}
               onClick={(e) => {
                 if (isLocked(el.layerId)) return
                 e.cancelBubble = true
@@ -1178,9 +1115,7 @@ export default function PlotCanvas() {
       </Stage>
 
       {/* Scale bar overlay */}
-      {(() => {
-        const showScaleBar = useProjectStore.getState().showScaleBar
-        if (!showScaleBar) return null
+      {showScaleBar && (() => {
         const pxPerMetre = BASE_PX * view.scale
         const targets = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100]
         const chosenM = targets.find((m) => m * pxPerMetre >= 60) ?? targets[targets.length - 1]

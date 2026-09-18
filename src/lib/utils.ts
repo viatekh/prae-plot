@@ -88,3 +88,19 @@ export function loadPercentage(loadW: number, ratingA: number, voltageV: number)
   const capacityW = ratingA * voltageV
   return (loadW / capacityW) * 100
 }
+
+/**
+ * Length of a cable run in metres: the manual override when set, otherwise the
+ * sum of the drawn segments (start → waypoints → end).
+ */
+export function cableLength(c: {
+  x: number; y: number; x2: number; y2: number
+  waypoints?: { x: number; y: number }[]
+  manualLength?: number
+}): number {
+  if (c.manualLength != null) return c.manualLength
+  const pts = [{ x: c.x, y: c.y }, ...(c.waypoints ?? []), { x: c.x2, y: c.y2 }]
+  let len = 0
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)
+  return len
+}

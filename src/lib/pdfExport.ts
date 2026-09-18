@@ -1,41 +1,55 @@
 import jsPDF from 'jspdf'
 import type { Project, CableElement, CableType } from '../types'
 import { CABLE_COLORS, CABLE_LABELS } from '../types'
-import { formatVersion } from './utils'
-import { defaultSymbolColors } from './symbols'
+import { formatVersion, cableLength } from './utils'
+import {
+  DEFAULT_PLOT_OPTIONS, contentBounds, drawLegend, drawPlot, paperDimensions, selectPlotContent,
+} from './plotVector'
+import type { PlotOptions } from './plotVector'
 import { formatCircuitRef, computeDistroLoad, computeCircuitLoad, circuitCapacityW } from '../store/projectStore'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const MM = 1              // unit: mm
-const MARGIN = 12 * MM
-const TITLE_BLOCK_H = 52 * MM   // height of title block
-const ROW_H = 6 * MM
+const MARGIN = 12            // mm
+const PLOT_TITLE_BLOCK_H = 52 // mm — the architectural block under a drawing
+const REPORT_FOOTER_H = 15   // mm — the compact strip under a report
+const ROW_H = 6              // mm
 
-// Helvetica font shortcuts
-const BOLD   = 'bold'   as const
+const BOLD = 'bold' as const
 const NORMAL = 'normal' as const
 
 // Colour palette — architectural drawing look
 const C = {
-  ink:        [15,  23,  42]  as [number,number,number],   // near black
-  mid:        [71,  85, 105]  as [number,number,number],   // slate-600
-  light:      [148,163,184]   as [number,number,number],   // slate-400
-  faint:      [226,232,240]   as [number,number,number],   // slate-200
-  white:      [255,255,255]   as [number,number,number],
-  blue:       [37,  99,235]   as [number,number,number],   // blue-600
-  bluePale:   [239,246,255]   as [number,number,number],   // blue-50
-  greenPale:  [240,253,244]   as [number,number,number],
-  red:        [220, 38, 38]   as [number,number,number],
-  amber:      [217,119,  6]   as [number,number,number],
+  ink:       [15, 23, 42] as RGB,    // near black
+  mid:       [71, 85, 105] as RGB,   // slate-600
+  light:     [148, 163, 184] as RGB, // slate-400
+  faint:     [226, 232, 240] as RGB, // slate-200
+  white:     [255, 255, 255] as RGB,
+  blue:      [37, 99, 235] as RGB,   // blue-600
+  bluePale:  [239, 246, 255] as RGB, // blue-50
+  red:       [220, 38, 38] as RGB,
+  amber:     [217, 119, 6] as RGB,
+  green:     [34, 197, 94] as RGB,
+}
+
+type RGB = [number, number, number]
+
+/** A built document, ready to preview or save. */
+export interface BuiltPdf {
+  doc: jsPDF
+  filename: string
+}
+
+export function savePdf(built: BuiltPdf) {
+  built.doc.save(built.filename)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function rgb(pdf: jsPDF, col: [number,number,number], mode: 'fill'|'text'|'draw') {
-  if (mode === 'fill')  pdf.setFillColor(col[0], col[1], col[2])
-  if (mode === 'text')  pdf.setTextColor(col[0], col[1], col[2])
-  if (mode === 'draw')  pdf.setDrawColor(col[0], col[1], col[2])
+function rgb(pdf: jsPDF, col: RGB, mode: 'fill' | 'text' | 'draw') {
+  if (mode === 'fill') pdf.setFillColor(col[0], col[1], col[2])
+  if (mode === 'text') pdf.setTextColor(col[0], col[1], col[2])
+  if (mode === 'draw') pdf.setDrawColor(col[0], col[1], col[2])
 }
 
 function line(pdf: jsPDF, x1: number, y1: number, x2: number, y2: number, lw = 0.2) {
@@ -47,212 +61,313 @@ function formatDate(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-function cableLength(c: CableElement): number {
-  if (c.manualLength != null) return c.manualLength
-  const pts = [{ x: c.x, y: c.y }, ...(c.waypoints ?? []), { x: c.x2, y: c.y2 }]
-  let len = 0
-  for (let i = 1; i < pts.length; i++) len += Math.sqrt((pts[i].x - pts[i-1].x)**2 + (pts[i].y - pts[i-1].y)**2)
-  return len
+/** Filesystem-safe version of a project name. */
+function slug(name: string): string {
+  return (name || 'Project').replace(/[^\w\-. ]+/g, '').trim().replace(/\s+/g, '_') || 'Project'
+}
+
+function filenameFor(project: Project, kind: string): string {
+  return `${slug(project.info.name)}_${kind}_${formatVersion(project.version)}_${formatDate()}.pdf`
+}
+
+/** Shortens text with an ellipsis so it fits `maxW` mm at the current font. */
+function fit(pdf: jsPDF, text: string, maxW: number): string {
+  if (!text) return ''
+  if (maxW <= 0) return ''
+  if (pdf.getTextWidth(text) <= maxW) return text
+  let lo = 0, hi = text.length
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (pdf.getTextWidth(text.slice(0, mid) + '…') <= maxW) lo = mid
+    else hi = mid - 1
+  }
+  return lo > 0 ? text.slice(0, lo) + '…' : ''
+}
+
+function setDocProperties(pdf: jsPDF, project: Project, subject: string) {
+  pdf.setProperties({
+    title: `${project.info.name} — ${subject}`,
+    subject,
+    author: project.info.drawingAuthor || project.info.lightingDesigner || project.info.companyName || 'Prae Plot',
+    creator: 'Prae Plot',
+    keywords: ['lighting', 'plot', project.info.venue].filter(Boolean).join(', '),
+  })
 }
 
 // ── Title block (architectural drawing frame) ─────────────────────────────────
-// Draws the bottom title block and border on the current page
 
-function drawTitleBlock(pdf: jsPDF, project: Project, W: number, H: number, subtitle = '') {
-  const tbY = H - TITLE_BLOCK_H
+interface TitleBlockExtras {
+  scaleLabel?: string
+  layerLabel?: string
+}
+
+function drawTitleBlock(
+  pdf: jsPDF, project: Project, W: number, H: number, subtitle: string,
+  page: number, pageCount: number, extras: TitleBlockExtras = {},
+) {
+  const tbY = H - PLOT_TITLE_BLOCK_H
   const m = MARGIN
 
   // Outer page border
   rgb(pdf, C.ink, 'draw')
-  line(pdf, m, m, W - m, m, 0.6)
-  line(pdf, m, m, m, H - m, 0.6)
-  line(pdf, W - m, m, W - m, H - m, 0.6)
-  line(pdf, m, H - m, W - m, H - m, 0.6)
+  pdf.setLineWidth(0.6)
+  pdf.rect(m, m, W - m * 2, H - m * 2, 'S')
 
   // Title block top rule
   line(pdf, m, tbY, W - m, tbY, 0.4)
 
-  // ── Left: company + project ──────────────────────────────────────────────
   const col1W = (W - m * 2) * 0.38
   const col2W = (W - m * 2) * 0.28
   const col3X = m + col1W + col2W
 
-  // Vertical dividers
   line(pdf, m + col1W, tbY, m + col1W, H - m, 0.3)
-  line(pdf, m + col1W + col2W, tbY, m + col1W + col2W, H - m, 0.3)
+  line(pdf, col3X, tbY, col3X, H - m, 0.3)
 
-  // Company name
-  let ty = tbY + 7
+  // ── Left: company, client, project, venue ──────────────────────────────────
+  let ty = tbY + 6
   pdf.setFont('helvetica', BOLD); pdf.setFontSize(10)
   rgb(pdf, C.ink, 'text')
-  pdf.text(project.info.companyName || 'Prae Plot', m + 3, ty)
+  pdf.text(fit(pdf, project.info.companyName || 'Prae Plot', col1W - 6), m + 3, ty)
 
-  // Client
   if (project.info.clientName) {
-    ty += 5
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7.5)
+    ty += 4.5
+    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
     rgb(pdf, C.light, 'text')
     pdf.text('CLIENT', m + 3, ty)
-    ty += 3.5
+    ty += 3.2
     rgb(pdf, C.mid, 'text'); pdf.setFontSize(8)
-    pdf.text(project.info.clientName, m + 3, ty)
+    pdf.text(fit(pdf, project.info.clientName, col1W - 6), m + 3, ty)
   }
 
-  ty += 6
-  line(pdf, m, ty, m + col1W, ty, 0.15)
   ty += 4
-
-  // Project name
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(11)
-  rgb(pdf, C.ink, 'text')
-  pdf.text(project.info.name, m + 3, ty, { maxWidth: col1W - 6 })
+  line(pdf, m, ty, m + col1W, ty, 0.15)
   ty += 4.5
 
-  // Subtitle / drawing title
-  if (subtitle) {
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8.5)
-    rgb(pdf, C.blue, 'text')
-    pdf.text(subtitle, m + 3, ty + 3)
-    ty += 6
-  }
+  pdf.setFont('helvetica', BOLD); pdf.setFontSize(11)
+  rgb(pdf, C.ink, 'text')
+  pdf.text(fit(pdf, project.info.name, col1W - 6), m + 3, ty)
+  ty += 4.5
 
-  ty += 3
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8.5)
+  rgb(pdf, C.blue, 'text')
+  pdf.text(fit(pdf, subtitle, col1W - 6), m + 3, ty)
+  ty += 4
+
   line(pdf, m, ty, m + col1W, ty, 0.15)
   ty += 4
 
-  // Venue
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7.5)
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
   rgb(pdf, C.light, 'text'); pdf.text('VENUE', m + 3, ty)
-  ty += 3.5
+  ty += 3.2
   rgb(pdf, C.mid, 'text'); pdf.setFontSize(8)
-  pdf.text(`${project.info.venue}${project.info.venueAddress ? ' — ' + project.info.venueAddress : ''}`, m + 3, ty, { maxWidth: col1W - 6 })
+  const venue = `${project.info.venue}${project.info.venueAddress ? ' — ' + project.info.venueAddress : ''}`
+  pdf.text(fit(pdf, venue || '—', col1W - 6), m + 3, ty)
 
-  // ── Middle: drawing metadata ──────────────────────────────────────────────
+  // ── Middle: responsibilities ───────────────────────────────────────────────
   const mx = m + col1W + 3
-  const fields2 = [
+  const fields: [string, string][] = [
     ['LIGHTING DESIGNER', project.info.lightingDesigner],
     ['TECHNICAL DIRECTOR', project.info.technicalDirector],
-    ['DRAWING AUTHOR',     project.info.drawingAuthor],
-    ['PROJECT DATE',       project.info.projectDate],
+    ['DRAWING AUTHOR', project.info.drawingAuthor],
+    ['PROJECT DATE', project.info.projectDate],
   ]
-  let my = tbY + 7
-  for (const [label, value] of fields2) {
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
+  let my = tbY + 6
+  for (const [label, value] of fields) {
+    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
     rgb(pdf, C.light, 'text')
     pdf.text(label, mx, my)
-    my += 3.2
+    my += 3
     pdf.setFont('helvetica', BOLD); pdf.setFontSize(8)
     rgb(pdf, C.ink, 'text')
-    pdf.text(value || '—', mx, my, { maxWidth: col2W - 6 })
-    my += 5
-    line(pdf, m + col1W, my - 1, m + col1W + col2W, my - 1, 0.1)
+    pdf.text(fit(pdf, value || '—', col2W - 6), mx, my)
+    my += 4.5
+    line(pdf, m + col1W, my - 1.2, col3X, my - 1.2, 0.1)
   }
 
-  // ── Right: version + logo ─────────────────────────────────────────────────
-  let rx = col3X + 3
-  let ry = tbY + 7
+  // ── Right: version, scale, generated stamp, logo ───────────────────────────
+  const rx = col3X + 3
+  const rightW = W - m - col3X - 6
+  let ry = tbY + 6
 
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-  rgb(pdf, C.light, 'text')
-  pdf.text('VERSION', rx, ry)
-  ry += 3.5
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(16)
-  rgb(pdf, C.ink, 'text')
-  pdf.text(formatVersion(project.version), rx, ry)
-  ry += 3
-
-  line(pdf, col3X, ry + 3, W - m, ry + 3, 0.15)
-  ry += 7
-
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-  rgb(pdf, C.light, 'text')
-  pdf.text('GENERATED', rx, ry)
-  ry += 3.5
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7.5)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(new Date().toLocaleString(), rx, ry, { maxWidth: W - m - col3X - 6 })
-
-  // Company logo
-  if (project.info.companyLogo) {
-    try {
-      const logoW = 28; const logoH = 12
-      pdf.addImage(project.info.companyLogo, 'PNG', W - m - logoW - 3, H - m - logoH - 3, logoW, logoH, undefined, 'FAST')
-    } catch { /* ignore */ }
-  }
-
-  // "Generated by" watermark bottom-right
   pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
   rgb(pdf, C.light, 'text')
-  pdf.text('Generated by Prae Plot', W - m - 3, H - m - 2, { align: 'right' })
-}
+  pdf.text('VERSION', rx, ry)
+  pdf.text('SCALE', rx + rightW * 0.45, ry)
+  ry += 4.5
+  pdf.setFont('helvetica', BOLD); pdf.setFontSize(13)
+  rgb(pdf, C.ink, 'text')
+  pdf.text(formatVersion(project.version), rx, ry)
+  pdf.setFontSize(extras.scaleLabel && extras.scaleLabel.length > 8 ? 9 : 11)
+  pdf.text(extras.scaleLabel ?? 'NTS', rx + rightW * 0.45, ry)
+  ry += 3
 
-// ── Symbol key ─────────────────────────────────────────────────────────────────
+  line(pdf, col3X, ry, W - m, ry, 0.15)
+  ry += 4.5
 
-function drawSymbolKey(pdf: jsPDF, project: Project, W: number, keyY: number) {
-  // Group by manufacturer+model (not just symbol type)
-  const fixtureTypes = new Map<string, { label: string; symbol: string }>()
-  for (const f of project.fixtures) {
-    const key = `${f.manufacturer} ${f.model}`
-    if (!fixtureTypes.has(key)) fixtureTypes.set(key, { label: key, symbol: f.symbol })
+  if (extras.layerLabel) {
+    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
+    rgb(pdf, C.light, 'text')
+    pdf.text('LAYERS', rx, ry)
+    ry += 3.2
+    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7.5)
+    rgb(pdf, C.mid, 'text')
+    pdf.text(fit(pdf, extras.layerLabel, rightW), rx, ry)
+    ry += 4.5
   }
-  if (fixtureTypes.size === 0) return
 
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
   rgb(pdf, C.light, 'text')
-  pdf.text('SYMBOL KEY', MARGIN, keyY)
+  pdf.text('GENERATED', rx, ry)
+  ry += 3.2
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
+  rgb(pdf, C.mid, 'text')
+  pdf.text(fit(pdf, new Date().toLocaleString(), rightW), rx, ry)
 
-  let x = MARGIN
-  let y = keyY + 5
-  const itemW = 58
-  const itemsPerRow = Math.floor((W - MARGIN * 2) / itemW)
-  let col = 0
+  if (project.info.companyLogo) {
+    try {
+      const logoW = 24, logoH = 10
+      pdf.addImage(project.info.companyLogo, W - m - logoW - 3, H - m - logoH - 5, logoW, logoH, undefined, 'FAST')
+    } catch { /* unusable logo data — the block still prints */ }
+  }
 
-  fixtureTypes.forEach(({ label, symbol }) => {
-    if (col >= itemsPerRow) { col = 0; x = MARGIN; y += 8 }
-    const colors = defaultSymbolColors[symbol as keyof typeof defaultSymbolColors] ?? { fill: '#9ca3af', stroke: '#6b7280' }
-    const hex = colors.fill
-    const r = parseInt(hex.slice(1, 3), 16)
-    const g = parseInt(hex.slice(3, 5), 16)
-    const b = parseInt(hex.slice(5, 7), 16)
-    pdf.setFillColor(r, g, b)
-    rgb(pdf, C.ink, 'draw')
-    pdf.setLineWidth(0.4)
-    pdf.circle(x + 3, y + 2, 3, 'FD')
-    rgb(pdf, C.ink, 'text')
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-    const clipped = label.length > 22 ? label.slice(0, 21) + '…' : label
-    pdf.text(clipped, x + 8, y + 3.5)
-    x += itemW; col++
-  })
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
+  rgb(pdf, C.light, 'text')
+  const stamp = pageCount > 1 ? `Page ${page} of ${pageCount}  ·  Generated by Prae Plot` : 'Generated by Prae Plot'
+  pdf.text(stamp, W - m - 3, H - m - 2, { align: 'right' })
 }
 
-// ── Table utilities ────────────────────────────────────────────────────────────
+// ── Report scaffolding ────────────────────────────────────────────────────────
+// Reports get a compact footer instead of the full architectural title block —
+// there is no drawing to frame, and an A4 sheet needs the room for rows.
 
-function tableHeader(pdf: jsPDF, x: number, y: number, cols: { label: string; w: number }[], totalW: number) {
+interface Report {
+  pdf: jsPDF
+  W: number
+  H: number
+  y: number
+  title: string
+  project: Project
+  /** Redrawn at the top of every continuation page. */
+  repeatHeader?: () => void
+}
+
+function startReport(project: Project, title: string): Report {
+  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  const W = pdf.internal.pageSize.getWidth()
+  const H = pdf.internal.pageSize.getHeight()
+  setDocProperties(pdf, project, title)
+
+  const r: Report = { pdf, W, H, y: 0, title, project }
+  r.y = reportHeader(r)
+  return r
+}
+
+function reportHeader(r: Report): number {
+  const { pdf, W, project, title } = r
+  const top = MARGIN + 4
+
+  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
+  rgb(pdf, C.ink, 'text')
+  pdf.text(title.toUpperCase(), MARGIN, top + 8)
+
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
+  rgb(pdf, C.mid, 'text')
+  const meta = [project.info.name, project.info.venue, formatVersion(project.version)].filter(Boolean).join('  ·  ')
+  pdf.text(fit(pdf, meta, W - MARGIN * 2), MARGIN, top + 14)
+
+  rgb(pdf, C.blue, 'draw')
+  pdf.setLineWidth(0.8)
+  pdf.line(MARGIN, top + 17, W - MARGIN, top + 17)
+  return top + 22
+}
+
+/** Bottom of the usable area on a report page. */
+function reportFloor(r: Report): number {
+  return r.H - REPORT_FOOTER_H - MARGIN
+}
+
+/** Starts a new page when `space` mm would not fit. Returns true if it broke. */
+function ensureSpace(r: Report, space: number): boolean {
+  if (r.y + space <= reportFloor(r)) return false
+  r.pdf.addPage()
+  r.y = reportHeader(r)
+  r.repeatHeader?.()
+  return true
+}
+
+function drawReportFooter(r: Report, page: number, pageCount: number) {
+  const { pdf, W, H, project } = r
+  const y = H - REPORT_FOOTER_H - MARGIN + 4
+
+  rgb(pdf, C.faint, 'draw')
+  line(pdf, MARGIN, y, W - MARGIN, y, 0.3)
+
+  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
+  rgb(pdf, C.light, 'text')
+  const left = [
+    project.info.companyName,
+    project.info.drawingAuthor && `Drawn by ${project.info.drawingAuthor}`,
+    project.info.projectDate,
+  ].filter(Boolean).join('  ·  ')
+  pdf.text(fit(pdf, left || 'Prae Plot', W * 0.6), MARGIN, y + 4.5)
+
+  const right = pageCount > 1 ? `Page ${page} of ${pageCount}  ·  Prae Plot` : 'Generated by Prae Plot'
+  pdf.text(right, W - MARGIN, y + 4.5, { align: 'right' })
+  pdf.text(new Date().toLocaleString(), W - MARGIN, y + 8, { align: 'right' })
+}
+
+function finishReport(r: Report, kind: string): BuiltPdf {
+  const count = r.pdf.getNumberOfPages()
+  for (let p = 1; p <= count; p++) {
+    r.pdf.setPage(p)
+    drawReportFooter(r, p, count)
+  }
+  return { doc: r.pdf, filename: filenameFor(r.project, kind) }
+}
+
+function emptyNote(r: Report, text: string) {
+  rgb(r.pdf, C.light, 'text')
+  r.pdf.setFont('helvetica', NORMAL); r.pdf.setFontSize(9)
+  r.pdf.text(text, r.W / 2, r.y + 12, { align: 'center' })
+  r.y += 20
+}
+
+// ── Table utilities ───────────────────────────────────────────────────────────
+
+interface Col { label: string; w: number; align?: 'left' | 'right' }
+
+/** Gives the flexible column whatever width the fixed ones leave over. */
+function fillColumn(cols: Col[], flexIndex: number, totalW: number) {
+  const fixed = cols.reduce((s, c, i) => (i === flexIndex ? s : s + c.w), 0)
+  cols[flexIndex].w = Math.max(12, totalW - fixed)
+}
+
+function tableHeader(pdf: jsPDF, x: number, y: number, cols: Col[], totalW: number) {
   rgb(pdf, C.ink, 'fill')
   pdf.rect(x, y, totalW, 5.5, 'F')
   rgb(pdf, C.white, 'text')
   pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
-  let cx = x + 1.5
+  let cx = x
   for (const col of cols) {
-    pdf.text(col.label, cx, y + 3.8)
+    if (col.align === 'right') pdf.text(col.label, cx + col.w - 1.5, y + 3.8, { align: 'right' })
+    else pdf.text(col.label, cx + 1.5, y + 3.8)
     cx += col.w
   }
   return y + 5.5
 }
 
-function tableRow(pdf: jsPDF, x: number, y: number, cells: string[], cols: { w: number }[], even: boolean, totalW: number, maxW?: number) {
+function tableRow(pdf: jsPDF, x: number, y: number, cells: string[], cols: Col[], even: boolean, totalW: number) {
   if (even) {
     rgb(pdf, C.faint, 'fill')
     pdf.rect(x, y, totalW, ROW_H - 0.5, 'F')
   }
   rgb(pdf, C.ink, 'text')
   pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
-  let cx = x + 1.5
-  for (let i = 0; i < cells.length; i++) {
-    const mw = maxW ? Math.min(cols[i].w - 2, maxW) : cols[i].w - 2
-    const clipped = cells[i].length > 30 ? cells[i].slice(0, 29) + '…' : cells[i]
-    pdf.text(clipped, cx, y + 4, { maxWidth: mw })
+  let cx = x
+  for (let i = 0; i < cells.length && i < cols.length; i++) {
+    const text = fit(pdf, cells[i] ?? '', cols[i].w - 3)
+    if (cols[i].align === 'right') pdf.text(text, cx + cols[i].w - 1.5, y + 4, { align: 'right' })
+    else pdf.text(text, cx + 1.5, y + 4)
     cx += cols[i].w
   }
   return y + ROW_H - 0.5
@@ -260,197 +375,236 @@ function tableRow(pdf: jsPDF, x: number, y: number, cells: string[], cols: { w: 
 
 // ── Plot PDF ──────────────────────────────────────────────────────────────────
 
-export async function exportPlotPDF(project: Project, stageDataURL: string, _layerIds?: string[], layerLabel?: string) {
-  const pdf = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a3' })
-  const W = pdf.internal.pageSize.getWidth()
-  const H = pdf.internal.pageSize.getHeight()
+export interface PlotPage {
+  /** Shown in the title block; omit for an all-layers drawing. */
+  label?: string
+  /** Undefined means every layer. */
+  layerIds?: string[]
+}
 
-  const contentTop = MARGIN + 2
-  const contentBot = H - TITLE_BLOCK_H - 8
-  const contentLeft = MARGIN + 2
-  const contentRight = W - MARGIN - 2
+export interface PlotExportRequest {
+  options?: Partial<PlotOptions>
+  /** One page per entry. Defaults to a single all-layers page. */
+  pages?: PlotPage[]
+  gridSize?: number
+}
 
-  // Plot image
-  const plotW = contentRight - contentLeft
-  const plotH = contentBot - contentTop - 10  // leave room for symbol key
+/**
+ * Builds the lighting plot as a scale-accurate vector drawing — see
+ * lib/plotVector.ts for why this is not a canvas screenshot.
+ */
+export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): BuiltPdf {
+  const opts: PlotOptions = { ...DEFAULT_PLOT_OPTIONS, ...req.options }
+  const pages: PlotPage[] = req.pages?.length ? req.pages : [{}]
+  const { w: W, h: H } = paperDimensions(opts.paper, opts.orientation)
 
-  pdf.addImage(stageDataURL, 'PNG', contentLeft, contentTop, plotW, plotH, undefined, 'FAST')
+  const pdf = new jsPDF({ orientation: opts.orientation, unit: 'mm', format: [W, H] })
+  setDocProperties(pdf, project, 'Lighting Plot')
 
-  // Symbol key above title block
-  const keyY = contentTop + plotH + 3
-  drawSymbolKey(pdf, project, W, keyY)
+  const layerName = (id: string) => project.layers.find((l) => l.id === id)?.name ?? id
 
-  // Layer label badge (if exporting single layer)
-  if (layerLabel) {
-    rgb(pdf, C.blue, 'fill')
-    pdf.roundedRect(contentLeft, contentTop + 2, 28, 6, 1, 1, 'F')
-    rgb(pdf, C.white, 'text')
-    pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
-    pdf.text(`Layer: ${layerLabel}`, contentLeft + 2, contentTop + 6)
-  }
+  // Every page of a set is drawn at one scale from one origin, so the sheets
+  // overlay each other the way a layered drawing set is supposed to.
+  const sharedBounds = pages.length > 1
+    ? contentBounds(selectPlotContent(
+        project,
+        pages.some((p) => !p.layerIds) ? undefined : [...new Set(pages.flatMap((p) => p.layerIds ?? []))],
+        opts.showBackground,
+      ))
+    : undefined
 
-  const subtitle = layerLabel ? `Lighting Plot — ${layerLabel}` : 'Lighting Plot'
-  drawTitleBlock(pdf, project, W, H, subtitle)
+  pages.forEach((page, i) => {
+    if (i > 0) pdf.addPage([W, H], opts.orientation)
 
-  const filename = layerLabel
-    ? `${project.info.name}_Plot_${layerLabel}_${formatVersion(project.version)}_${formatDate()}.pdf`
-    : `${project.info.name}_Plot_${formatVersion(project.version)}_${formatDate()}.pdf`
-  pdf.save(filename)
+    const legendW = opts.showLegend ? Math.min(58, Math.max(40, W * 0.15)) : 0
+    const area = {
+      x: MARGIN + 3,
+      y: MARGIN + 3,
+      w: W - MARGIN * 2 - 6,
+      h: H - PLOT_TITLE_BLOCK_H - MARGIN - 6,
+    }
+    const drawing = { ...area, w: area.w - (legendW ? legendW + 5 : 0) }
+
+    const content = selectPlotContent(project, page.layerIds, opts.showBackground)
+    const result = drawPlot(pdf, project, content, drawing, opts, req.gridSize ?? 1, sharedBounds)
+
+    if (legendW) {
+      // Separator between drawing and key column
+      rgb(pdf, C.faint, 'draw')
+      line(pdf, area.x + drawing.w + 2.5, area.y, area.x + drawing.w + 2.5, area.y + area.h, 0.2)
+      drawLegend(pdf, { x: area.x + drawing.w + 5, y: area.y, w: legendW, h: area.h }, content, result, opts.paper)
+    }
+
+    if (result.scale.overflow) {
+      rgb(pdf, C.amber, 'fill')
+      pdf.roundedRect(drawing.x, drawing.y, 62, 6, 1, 1, 'F')
+      rgb(pdf, C.white, 'text')
+      pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
+      pdf.text('Drawing is clipped at this scale', drawing.x + 2, drawing.y + 4)
+    }
+
+    const layerLabel = page.label
+      ?? (page.layerIds ? page.layerIds.map(layerName).join(', ') : 'All layers')
+    const subtitle = page.label ? `Lighting Plot — ${page.label}` : 'Lighting Plot'
+
+    drawTitleBlock(pdf, project, W, H, subtitle, i + 1, pages.length, {
+      scaleLabel: `1:${result.scale.denominator}${result.scale.standard ? '' : '*'}`,
+      layerLabel,
+    })
+  })
+
+  const suffix = pages.length === 1 && pages[0].label ? `Plot_${slug(pages[0].label)}` : 'Plot'
+  return { doc: pdf, filename: filenameFor(project, suffix) }
 }
 
 // ── Patch PDF ─────────────────────────────────────────────────────────────────
 
-export async function exportPatchPDF(project: Project) {
-  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const W = pdf.internal.pageSize.getWidth()
-  const H = pdf.internal.pageSize.getHeight()
-  const distros = project.distros
+export function buildPatchPDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Patch Sheet')
+  const { pdf, W } = r
+  const totalW = W - MARGIN * 2
+
+  const cols: Col[] = [
+    { label: 'CH', w: 10 },
+    { label: 'CIRCUIT', w: 30 },
+    { label: 'FIXTURE', w: 0 },
+    { label: 'PATCH', w: 20 },
+    { label: 'MODE', w: 24 },
+    { label: 'CH CNT', w: 14, align: 'right' },
+    { label: 'COLOUR', w: 18 },
+    { label: 'NOTES', w: 30 },
+  ]
+  fillColumn(cols, 2, totalW)
 
   const fixtures = [...project.fixtures].sort((a, b) => a.channel - b.channel)
+  if (fixtures.length === 0) {
+    emptyNote(r, 'No fixtures placed yet.')
+    return finishReport(r, 'Patch')
+  }
 
-  const contentTop = MARGIN + 4
-  const cols = [
-    { label: 'ID',      w: 10 },
-    { label: 'CIRCUIT', w: 32 },
-    { label: 'FIXTURE', w: 52 },
-    { label: 'PATCH',   w: 20 },
-    { label: 'MODE',    w: 24 },
-    { label: 'CH CNT',  w: 13 },
-    { label: 'COLOUR',  w: 18 },
-    { label: 'NOTES',   w: 0  },
-  ]
-  const totalW = W - MARGIN * 2
-  cols[cols.length - 1].w = totalW - cols.slice(0, -1).reduce((s, c) => s + c.w, 0)
+  r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW) }
+  r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW)
 
-  // Page title
-  rgb(pdf, C.ink, 'text')
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
-  pdf.text('PATCH SHEET', MARGIN, contentTop + 8)
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(`${project.info.name}  ·  ${project.info.venue}  ·  v${formatVersion(project.version)}`, MARGIN, contentTop + 14)
-
-  // Separator
-  rgb(pdf, C.blue, 'draw')
-  pdf.setLineWidth(0.8)
-  pdf.line(MARGIN, contentTop + 17, W - MARGIN, contentTop + 17)
-
-  let y = contentTop + 22
-  y = tableHeader(pdf, MARGIN, y, cols, totalW)
-
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
   fixtures.forEach((f, idx) => {
-    if (y > H - TITLE_BLOCK_H - 10) {
-      pdf.addPage()
-      y = MARGIN + 4
-      y = tableHeader(pdf, MARGIN, y, cols, totalW)
-    }
-    const circ = formatCircuitRef(distros, f.circuitId)
-    const row = [
+    ensureSpace(r, ROW_H)
+    r.y = tableRow(pdf, MARGIN, r.y, [
       String(f.channel || '—'),
-      circ,
+      formatCircuitRef(project.distros, f.circuitId),
       `${f.manufacturer} ${f.model}`,
       `${f.universe}.${String(f.address).padStart(3, '0')}`,
       f.mode,
       String(f.channelCount || '—'),
       f.color || '—',
       f.notes || '',
-    ]
-    y = tableRow(pdf, MARGIN, y, row, cols, idx % 2 === 0, totalW)
+    ], cols, idx % 2 === 0, totalW)
   })
 
-  if (fixtures.length === 0) {
-    rgb(pdf, C.light, 'text'); pdf.setFontSize(9)
-    pdf.text('No fixtures placed yet.', W / 2, y + 12, { align: 'center' })
-  } else {
-    // Summary footer
-    y += 2
-    rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN, y, totalW, 6, 'F')
-    rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
-    pdf.text(`${fixtures.length} fixture${fixtures.length !== 1 ? 's' : ''} · ${(project.fixtures.reduce((s, f) => s + f.powerRating, 0) / 1000).toFixed(1)} kW · ${project.fixtures.reduce((s, f) => s + f.weight, 0).toFixed(1)} kg`, MARGIN + 2, y + 4)
-  }
+  ensureSpace(r, 8)
+  r.y += 2
+  rgb(pdf, C.faint, 'fill')
+  pdf.rect(MARGIN, r.y, totalW, 6, 'F')
+  rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
+  const kw = fixtures.reduce((s, f) => s + f.powerRating, 0) / 1000
+  const kg = fixtures.reduce((s, f) => s + f.weight, 0)
+  pdf.text(`${fixtures.length} fixture${fixtures.length !== 1 ? 's' : ''} · ${kw.toFixed(1)} kW · ${kg.toFixed(1)} kg`, MARGIN + 2, r.y + 4)
+  r.y += 8
 
-  drawTitleBlock(pdf, project, W, H, 'Patch Sheet')
-  pdf.save(`${project.info.name}_Patch_${formatVersion(project.version)}_${formatDate()}.pdf`)
+  return finishReport(r, 'Patch')
 }
 
 // ── Equipment PDF ─────────────────────────────────────────────────────────────
 
-export async function exportEquipmentPDF(project: Project) {
-  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const W = pdf.internal.pageSize.getWidth()
-  const H = pdf.internal.pageSize.getHeight()
-
-  const contentTop = MARGIN + 4
+export function buildEquipmentPDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Equipment List')
+  const { pdf, W } = r
   const totalW = W - MARGIN * 2
-  const cols = [
-    { label: 'QTY',  w: 12 },
+
+  const cols: Col[] = [
+    { label: 'QTY', w: 14, align: 'right' },
     { label: 'FIXTURE', w: 0 },
-    { label: 'WEIGHT', w: 20 },
-    { label: 'POWER',  w: 20 },
+    { label: 'WEIGHT', w: 24, align: 'right' },
+    { label: 'POWER', w: 24, align: 'right' },
   ]
-  cols[1].w = totalW - cols.filter((_, i) => i !== 1).reduce((s, c) => s + c.w, 0)
+  fillColumn(cols, 1, totalW)
 
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
-  rgb(pdf, C.ink, 'text')
-  pdf.text('EQUIPMENT LIST', MARGIN, contentTop + 8)
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(`${project.info.name}  ·  ${project.info.venue}  ·  v${formatVersion(project.version)}`, MARGIN, contentTop + 14)
-  rgb(pdf, C.blue, 'draw'); pdf.setLineWidth(0.8)
-  pdf.line(MARGIN, contentTop + 17, W - MARGIN, contentTop + 17)
-
-  const byModel: Record<string, { name: string; manufacturer: string; qty: number; weight: number; power: number }> = {}
+  const byModel = new Map<string, { name: string; manufacturer: string; qty: number; weight: number; power: number }>()
   for (const f of project.fixtures) {
     const key = `${f.manufacturer}__${f.model}`
-    if (!byModel[key]) byModel[key] = { name: f.model, manufacturer: f.manufacturer, qty: 0, weight: 0, power: 0 }
-    byModel[key].qty += 1
-    byModel[key].weight += f.weight
-    byModel[key].power += f.powerRating
+    const entry = byModel.get(key) ?? { name: f.model, manufacturer: f.manufacturer, qty: 0, weight: 0, power: 0 }
+    entry.qty += 1
+    entry.weight += f.weight
+    entry.power += f.powerRating
+    byModel.set(key, entry)
   }
+  const items = [...byModel.values()].sort((a, b) => b.qty - a.qty)
 
-  let y = contentTop + 22
-  y = tableHeader(pdf, MARGIN, y, cols, totalW)
+  if (items.length === 0) {
+    emptyNote(r, 'No fixtures placed yet.')
+  } else {
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW)
+    items.forEach((item, idx) => {
+      ensureSpace(r, ROW_H)
+      r.y = tableRow(pdf, MARGIN, r.y, [
+        String(item.qty),
+        `${item.manufacturer}  ${item.name}`,
+        `${item.weight.toFixed(1)} kg`,
+        `${item.power.toFixed(0)} W`,
+      ], cols, idx % 2 === 0, totalW)
+    })
 
-  const items = Object.values(byModel).sort((a, b) => b.qty - a.qty)
-  items.forEach((item, idx) => {
-    if (y > H - TITLE_BLOCK_H - 10) {
-      pdf.addPage(); y = MARGIN + 4
-      y = tableHeader(pdf, MARGIN, y, cols, totalW)
-    }
-    y = tableRow(pdf, MARGIN, y, [
-      String(item.qty),
-      `${item.manufacturer}  ${item.name}`,
-      `${item.weight.toFixed(1)} kg`,
-      `${item.power.toFixed(0)} W`,
-    ], cols, idx % 2 === 0, totalW)
-  })
-
-  if (items.length > 0) {
-    y += 1
+    ensureSpace(r, 8)
+    r.y += 1
     rgb(pdf, C.ink, 'fill')
-    pdf.rect(MARGIN, y, totalW, 6, 'F')
+    pdf.rect(MARGIN, r.y, totalW, 6, 'F')
     rgb(pdf, C.white, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
     const tw = project.fixtures.reduce((s, f) => s + f.weight, 0)
     const tp = project.fixtures.reduce((s, f) => s + f.powerRating, 0)
-    pdf.text('TOTAL', MARGIN + 2, y + 4)
+    pdf.text('TOTAL', MARGIN + 2, r.y + 4)
     const wCol = MARGIN + cols[0].w + cols[1].w
-    pdf.text(`${tw.toFixed(1)} kg`, wCol + 2, y + 4)
-    pdf.text(`${tp.toFixed(0)} W`, wCol + cols[2].w + 2, y + 4)
+    pdf.text(`${tw.toFixed(1)} kg`, wCol + cols[2].w - 1.5, r.y + 4, { align: 'right' })
+    pdf.text(`${tp.toFixed(0)} W`, wCol + cols[2].w + cols[3].w - 1.5, r.y + 4, { align: 'right' })
+    r.y += 8
   }
 
-  drawTitleBlock(pdf, project, W, H, 'Equipment List')
-  pdf.save(`${project.info.name}_Equipment_${formatVersion(project.version)}_${formatDate()}.pdf`)
+  // Devices belong on the equipment list too — they are things that get packed.
+  if (project.devices.length > 0) {
+    ensureSpace(r, 20)
+    r.y += 4
+    pdf.setFont('helvetica', BOLD); pdf.setFontSize(8)
+    rgb(pdf, C.mid, 'text')
+    pdf.text('DEVICES', MARGIN, r.y)
+    r.y += 2
+    const dCols: Col[] = [
+      { label: 'QTY', w: 14, align: 'right' },
+      { label: 'DEVICE', w: 0 },
+      { label: 'CATEGORY', w: 34 },
+      { label: 'POWER', w: 24, align: 'right' },
+    ]
+    fillColumn(dCols, 1, totalW)
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, dCols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, dCols, totalW)
+    project.devices.forEach((d, idx) => {
+      ensureSpace(r, ROW_H)
+      r.y = tableRow(pdf, MARGIN, r.y, [
+        '1',
+        [d.manufacturer, d.model, d.name].filter(Boolean).join(' ') || d.name,
+        d.category,
+        d.powerRating ? `${d.powerRating} W` : '—',
+      ], dCols, idx % 2 === 0, totalW)
+    })
+  }
+
+  return finishReport(r, 'Equipment')
 }
 
 // ── Cable PDF ─────────────────────────────────────────────────────────────────
 
 const RENTAL_LENGTHS: Record<string, number[]> = {
-  power:   [1, 2, 5, 10, 20],
-  data:    [1, 2, 5, 10, 20],
+  power: [1, 2, 5, 10, 20],
+  data: [1, 2, 5, 10, 20],
   network: [1, 2, 5, 10, 20, 50],
-  audio:   [1, 2, 5, 10, 20],
+  audio: [1, 2, 5, 10, 20],
 }
 
 function getRentalLengths(type: CableType): number[] {
@@ -460,18 +614,27 @@ function getRentalLengths(type: CableType): number[] {
   return RENTAL_LENGTHS.audio
 }
 
-function breakIntoLengths(totalM: number, available: number[]): Record<number, number> {
-  const sorted = [...available].sort((a, b) => b - a)
+/**
+ * Stock lengths needed for ONE run. A single cable is used when a stock length
+ * covers the run; otherwise runs are made up from the longest stock length plus
+ * one that covers the remainder. Packing the *sum* of all runs (as this used to
+ * do) under-counts badly — three 6 m runs need three cables, not 18 m of them.
+ */
+function packRun(needM: number, available: number[]): Record<number, number> {
+  const asc = [...available].sort((a, b) => a - b)
+  if (asc.length === 0 || needM <= 0) return {}
   const result: Record<number, number> = {}
-  let rem = totalM
-  for (const len of sorted) {
-    const count = Math.floor(rem / len)
-    if (count > 0) { result[len] = count; rem -= count * len }
+  const single = asc.find((l) => l >= needM)
+  if (single) return { [single]: 1 }
+
+  const longest = asc[asc.length - 1]
+  let rem = needM
+  while (rem > longest) {
+    result[longest] = (result[longest] ?? 0) + 1
+    rem -= longest
   }
-  if (rem > 0.05) {
-    const min = sorted[sorted.length - 1]
-    result[min] = (result[min] ?? 0) + 1
-  }
+  const last = asc.find((l) => l >= rem) ?? longest
+  result[last] = (result[last] ?? 0) + 1
   return result
 }
 
@@ -481,86 +644,74 @@ function resolveName(id: string | undefined, project: Project): string {
   if (fx) return `CH${fx.channel} ${fx.shortName || fx.model}`
   const dx = project.distros.find((d) => d.id === id)
   if (dx) return dx.ref ? `[${dx.ref}] ${dx.name}` : dx.name
+  const dv = project.devices.find((d) => d.id === id)
+  if (dv) return dv.name
   return '—'
 }
 
-export async function exportCablePDF(project: Project) {
-  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const W = pdf.internal.pageSize.getWidth()
-  const H = pdf.internal.pageSize.getHeight()
-  const contentTop = MARGIN + 4
-  const totalW = W - MARGIN * 2
-  const OVERHEAD = 0.20  // 20%
+const CABLE_OVERHEAD = 0.20 // 20% slack on drawn lengths
 
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
-  rgb(pdf, C.ink, 'text')
-  pdf.text('CABLE SCHEDULE', MARGIN, contentTop + 8)
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(`${project.info.name}  ·  ${project.info.venue}  ·  v${formatVersion(project.version)}`, MARGIN, contentTop + 14)
-  rgb(pdf, C.blue, 'draw'); pdf.setLineWidth(0.8)
-  pdf.line(MARGIN, contentTop + 17, W - MARGIN, contentTop + 17)
+export function buildCablePDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Cable Schedule')
+  const { pdf, W } = r
+  const totalW = W - MARGIN * 2
 
   const cables = project.elements.filter((e) => e.type === 'cable') as CableElement[]
   if (cables.length === 0) {
-    rgb(pdf, C.light, 'text'); pdf.setFontSize(9)
-    pdf.text('No cable runs drawn.', W / 2, contentTop + 30, { align: 'center' })
-    drawTitleBlock(pdf, project, W, H, 'Cable Schedule')
-    pdf.save(`${project.info.name}_Cables_${formatVersion(project.version)}_${formatDate()}.pdf`)
-    return
+    emptyNote(r, 'No cable runs drawn.')
+    return finishReport(r, 'Cables')
   }
 
-  // Group by type
-  const byType: Record<string, CableElement[]> = {}
+  const byType = new Map<CableType, CableElement[]>()
   for (const c of cables) {
-    if (!byType[c.cableType]) byType[c.cableType] = []
-    byType[c.cableType].push(c)
+    const list = byType.get(c.cableType) ?? []
+    list.push(c)
+    byType.set(c.cableType, list)
   }
 
-  const runCols = [
-    { label: '#',     w: 8 },
-    { label: 'FROM',  w: 42 },
-    { label: 'TO',    w: 42 },
-    { label: 'PLOT',  w: 18 },
-    { label: '+20%',  w: 18 },
+  const runCols: Col[] = [
+    { label: '#', w: 9, align: 'right' },
+    { label: 'LABEL', w: 16 },
+    { label: 'FROM', w: 0 },
+    { label: 'TO', w: 40 },
+    { label: 'DRAWN', w: 20, align: 'right' },
+    { label: '+20%', w: 20, align: 'right' },
   ]
-  runCols[runCols.length - 1].w = totalW - runCols.slice(0, -1).reduce((s, c) => s + c.w, 0)
+  fillColumn(runCols, 2, totalW)
 
-  let y = contentTop + 22
   let runIdx = 1
+  for (const [type, runs] of byType) {
+    ensureSpace(r, 30)
 
-  for (const [type, runs] of Object.entries(byType)) {
-    if (y > H - TITLE_BLOCK_H - 20) {
-      pdf.addPage(); y = MARGIN + 4
-    }
-
-    // Type heading bar with colour swatch
-    const hexColor = CABLE_COLORS[type as CableType] ?? '#9ca3af'
-    const r = parseInt(hexColor.slice(1, 3), 16)
-    const g = parseInt(hexColor.slice(3, 5), 16)
-    const b = parseInt(hexColor.slice(5, 7), 16)
-    pdf.setFillColor(r, g, b)
-    pdf.rect(MARGIN, y, 3, 5.5, 'F')
+    const hex = CABLE_COLORS[type] ?? '#9ca3af'
+    pdf.setFillColor(hex)
+    pdf.rect(MARGIN, r.y, 3, 5.5, 'F')
     rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN + 3, y, totalW - 3, 5.5, 'F')
+    pdf.rect(MARGIN + 3, r.y, totalW - 3, 5.5, 'F')
     rgb(pdf, C.ink, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7.5)
-    pdf.text(CABLE_LABELS[type as CableType] ?? type, MARGIN + 6, y + 3.8)
-    const typeTotal = runs.reduce((s, c) => s + cableLength(c) * (1 + OVERHEAD), 0)
-    rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
-    pdf.text(`${runs.length} run${runs.length !== 1 ? 's' : ''}  ·  ${typeTotal.toFixed(1)} m total`, W - MARGIN - 2, y + 3.8, { align: 'right' })
-    y += 5.5
+    pdf.text(CABLE_LABELS[type] ?? type, MARGIN + 6, r.y + 3.8)
 
-    y = tableHeader(pdf, MARGIN, y, runCols, totalW)
+    const typeTotal = runs.reduce((s, c) => s + cableLength(c) * (1 + CABLE_OVERHEAD), 0)
+    rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
+    pdf.text(`${runs.length} run${runs.length !== 1 ? 's' : ''}  ·  ${typeTotal.toFixed(1)} m total`, W - MARGIN - 2, r.y + 3.8, { align: 'right' })
+    r.y += 5.5
+
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, runCols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, runCols, totalW)
+
+    const available = getRentalLengths(type)
+    const breakdown: Record<number, number> = {}
 
     runs.forEach((c, i) => {
-      if (y > H - TITLE_BLOCK_H - 10) {
-        pdf.addPage(); y = MARGIN + 4
-        y = tableHeader(pdf, MARGIN, y, runCols, totalW)
-      }
+      ensureSpace(r, ROW_H)
       const plotM = cableLength(c)
-      const withOH = plotM * (1 + OVERHEAD)
-      y = tableRow(pdf, MARGIN, y, [
+      const withOH = plotM * (1 + CABLE_OVERHEAD)
+      for (const [len, qty] of Object.entries(packRun(withOH, available))) {
+        breakdown[Number(len)] = (breakdown[Number(len)] ?? 0) + qty
+      }
+      r.y = tableRow(pdf, MARGIN, r.y, [
         String(runIdx++),
+        c.autoLabel ?? '—',
         resolveName(c.startConnectedTo, project),
         resolveName(c.endConnectedTo, project),
         `${plotM.toFixed(1)} m`,
@@ -568,275 +719,244 @@ export async function exportCablePDF(project: Project) {
       ], runCols, i % 2 === 0, totalW)
     })
 
-    // Optimal length breakdown
-    y += 3
-    if (y > H - TITLE_BLOCK_H - 30) {
-      pdf.addPage(); y = MARGIN + 4
-    }
-    const available = getRentalLengths(type as CableType)
-    const breakdown = breakIntoLengths(typeTotal, available)
-    const sorted = available.filter((l) => breakdown[l])
-
+    // Stock lengths to pull from the store
+    const lengths = available.filter((l) => breakdown[l])
+    ensureSpace(r, 20)
+    r.y += 3
     rgb(pdf, C.light, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
-    pdf.text('OPTIMAL LENGTHS', MARGIN, y + 3)
-    y += 4.5
+    pdf.text('CABLES TO PULL (per run, incl. 20% slack)', MARGIN, r.y + 3)
+    r.y += 5
 
-    sorted.forEach((len, i) => {
-      const qty = breakdown[len] ?? 0
-      if (qty === 0) return
-      const bx = MARGIN + i * 30
+    lengths.forEach((len, i) => {
+      const qty = breakdown[len]
+      const bx = MARGIN + (i % 6) * 30
+      const by = r.y + Math.floor(i / 6) * 11
       rgb(pdf, C.bluePale, 'fill')
-      pdf.roundedRect(bx, y, 26, 9, 1, 1, 'F')
+      pdf.roundedRect(bx, by, 27, 9, 1, 1, 'F')
       rgb(pdf, C.blue, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(9)
-      pdf.text(`${qty}×`, bx + 2, y + 6.5)
+      pdf.text(`${qty}×`, bx + 2, by + 6)
       rgb(pdf, C.ink, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-      pdf.text(`${len} m`, bx + 11, y + 6.5)
+      pdf.text(`${len} m`, bx + 11, by + 6)
     })
-    y += 13
+    r.y += Math.ceil(Math.max(1, lengths.length) / 6) * 11 + 4
   }
 
-  drawTitleBlock(pdf, project, W, H, 'Cable Schedule')
-  pdf.save(`${project.info.name}_Cables_${formatVersion(project.version)}_${formatDate()}.pdf`)
+  return finishReport(r, 'Cables')
 }
 
 // ── Power PDF ─────────────────────────────────────────────────────────────────
 
-export async function exportPowerPDF(project: Project) {
-  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const W = pdf.internal.pageSize.getWidth()
-  const H = pdf.internal.pageSize.getHeight()
-  const contentTop = MARGIN + 4
+const NOMINAL_VOLTAGE = 230
+
+export function buildPowerPDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Power Report')
+  const { pdf, W } = r
   const totalW = W - MARGIN * 2
   const kw = (w: number) => `${(w / 1000).toFixed(2)} kW`
 
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
-  rgb(pdf, C.ink, 'text')
-  pdf.text('POWER REPORT', MARGIN, contentTop + 8)
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(`${project.info.name}  ·  ${project.info.venue}  ·  v${formatVersion(project.version)}`, MARGIN, contentTop + 14)
-  rgb(pdf, C.blue, 'draw'); pdf.setLineWidth(0.8)
-  pdf.line(MARGIN, contentTop + 17, W - MARGIN, contentTop + 17)
-
   const { distros, fixtures, elements } = project
   const totalFixturePower = fixtures.reduce((s, f) => s + f.powerRating, 0)
-  const totalCapacity = distros.reduce((s, d) => s + d.incomingRating * d.phases * 230, 0)
+  const totalCapacity = distros.reduce((s, d) => s + d.incomingRating * d.phases * NOMINAL_VOLTAGE, 0)
   const totalAssigned = distros.reduce((s, d) => s + computeDistroLoad(d, distros, fixtures, elements, new Set()), 0)
   const unassigned = fixtures.filter((f) => !f.circuitId).length
 
-  // KPI summary boxes
-  let y = contentTop + 22
   const kpiBoxW = (totalW - 6) / 4
   const kpis = [
-    { label: 'FIXTURE LOAD',     value: kw(totalFixturePower), sub: `${fixtures.length} fixtures` },
-    { label: 'DISTRO CAPACITY',  value: kw(totalCapacity),     sub: `${distros.length} distros` },
-    { label: 'ASSIGNED LOAD',    value: kw(totalAssigned),     sub: totalCapacity > 0 ? `${Math.round(totalAssigned / totalCapacity * 100)}% of capacity` : '—' },
-    { label: 'UNASSIGNED',       value: String(unassigned),    sub: unassigned > 0 ? 'fixtures need circuit' : 'all assigned' },
+    { label: 'FIXTURE LOAD', value: kw(totalFixturePower), sub: `${fixtures.length} fixtures` },
+    { label: 'DISTRO CAPACITY', value: kw(totalCapacity), sub: `${distros.length} distros` },
+    { label: 'ASSIGNED LOAD', value: kw(totalAssigned), sub: totalCapacity > 0 ? `${Math.round(totalAssigned / totalCapacity * 100)}% of capacity` : '—' },
+    { label: 'UNASSIGNED', value: String(unassigned), sub: unassigned > 0 ? 'fixtures need a circuit' : 'all assigned' },
   ]
   kpis.forEach((k, i) => {
     const bx = MARGIN + i * (kpiBoxW + 2)
     rgb(pdf, C.faint, 'fill')
-    pdf.roundedRect(bx, y, kpiBoxW, 17, 1, 1, 'F')
+    pdf.roundedRect(bx, r.y, kpiBoxW, 17, 1, 1, 'F')
     pdf.setFont('helvetica', NORMAL); pdf.setFontSize(5.5)
     rgb(pdf, C.light, 'text')
-    pdf.text(k.label, bx + 2.5, y + 4.5)
+    pdf.text(k.label, bx + 2.5, r.y + 4.5)
     pdf.setFont('helvetica', BOLD); pdf.setFontSize(9.5)
     rgb(pdf, C.ink, 'text')
-    pdf.text(k.value, bx + 2.5, y + 10.5)
+    pdf.text(fit(pdf, k.value, kpiBoxW - 5), bx + 2.5, r.y + 10.5)
     pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
     rgb(pdf, C.mid, 'text')
-    pdf.text(k.sub, bx + 2.5, y + 14.5)
+    pdf.text(fit(pdf, k.sub, kpiBoxW - 5), bx + 2.5, r.y + 14.5)
   })
-  y += 22
+  r.y += 22
 
   if (distros.length === 0) {
-    rgb(pdf, C.light, 'text'); pdf.setFontSize(9)
-    pdf.text('No power distribution added.', W / 2, y + 12, { align: 'center' })
-    drawTitleBlock(pdf, project, W, H, 'Power Report')
-    pdf.save(`${project.info.name}_Power_${formatVersion(project.version)}_${formatDate()}.pdf`)
-    return
+    emptyNote(r, 'No power distribution added.')
+    return finishReport(r, 'Power')
   }
 
   for (const distro of distros) {
-    if (y > H - TITLE_BLOCK_H - 60) { pdf.addPage(); y = MARGIN + 4 }
+    ensureSpace(r, 45)
 
     const totalLoad = computeDistroLoad(distro, distros, fixtures, elements, new Set())
     const directLoad = distro.circuits.reduce((s, c) => s + computeCircuitLoad(fixtures, c.id), 0)
     const downstreamLoad = totalLoad - directLoad
-    const capacity = distro.incomingRating * distro.phases * 230
-    const p = capacity > 0 ? Math.round(totalLoad / capacity * 100) : 0
+    const capacity = distro.incomingRating * distro.phases * NOMINAL_VOLTAGE
+    const pct = capacity > 0 ? Math.round(totalLoad / capacity * 100) : 0
 
-    // Header
     rgb(pdf, C.ink, 'fill')
-    pdf.rect(MARGIN, y, totalW, 11, 'F')
+    pdf.rect(MARGIN, r.y, totalW, 11, 'F')
     rgb(pdf, C.white, 'text')
     pdf.setFont('helvetica', BOLD); pdf.setFontSize(9)
-    const title = distro.ref ? `[${distro.ref}]  ${distro.name}` : distro.name
-    pdf.text(title, MARGIN + 3, y + 5)
-    const pTextCol: [number,number,number] = p > 90 ? [252,165,165] : p > 70 ? [253,230,138] : [134,239,172]
-    rgb(pdf, pTextCol, 'text')
-    pdf.text(`${kw(totalLoad)}  ·  ${p}%`, W - MARGIN - 3, y + 5, { align: 'right' })
-    rgb(pdf, [156,163,175] as [number,number,number], 'text')
+    pdf.text(distro.ref ? `[${distro.ref}]  ${distro.name}` : distro.name, MARGIN + 3, r.y + 5)
+    const pctColor: RGB = pct > 90 ? [252, 165, 165] : pct > 70 ? [253, 230, 138] : [134, 239, 172]
+    rgb(pdf, pctColor, 'text')
+    pdf.text(`${kw(totalLoad)}  ·  ${pct}%`, W - MARGIN - 3, r.y + 5, { align: 'right' })
+    rgb(pdf, [156, 163, 175], 'text')
     pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-    pdf.text(`${distro.incomingRating}A · ${distro.phases}Ø · ${distro.circuits.length} circuits`, MARGIN + 3, y + 9)
-    const downStr = downstreamLoad > 0
-      ? `${kw(directLoad)} direct + ${kw(downstreamLoad)} downstream  ·  capacity ${kw(capacity)}`
-      : `${kw(directLoad)} direct  ·  capacity ${kw(capacity)}`
-    pdf.text(downStr, W - MARGIN - 3, y + 9, { align: 'right' })
-    y += 11
+    pdf.text(`${distro.incomingRating}A · ${distro.phases}Ø · ${distro.circuits.length} circuits`, MARGIN + 3, r.y + 9)
+    pdf.text(
+      downstreamLoad > 0
+        ? `${kw(directLoad)} direct + ${kw(downstreamLoad)} downstream  ·  capacity ${kw(capacity)}`
+        : `${kw(directLoad)} direct  ·  capacity ${kw(capacity)}`,
+      W - MARGIN - 3, r.y + 9, { align: 'right' },
+    )
+    r.y += 11
 
-    // Load bar
     rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN, y, totalW, 4, 'F')
-    const barCol: [number,number,number] = p > 90 ? C.red : p > 70 ? C.amber : [34,197,94]
-    rgb(pdf, barCol, 'fill')
-    pdf.rect(MARGIN, y, totalW * Math.min(p, 100) / 100, 4, 'F')
-    y += 6
+    pdf.rect(MARGIN, r.y, totalW, 4, 'F')
+    rgb(pdf, pct > 90 ? C.red : pct > 70 ? C.amber : C.green, 'fill')
+    pdf.rect(MARGIN, r.y, totalW * Math.min(pct, 100) / 100, 4, 'F')
+    r.y += 6
 
-    // Phase balance for 3Ø
     if (distro.phases === 3) {
       const byPhase = [1, 2, 3].map((ph) => {
-        const pCircs = distro.circuits.filter((c) => c.phase === ph)
-        const load = pCircs.reduce((s, c) => s + computeCircuitLoad(fixtures, c.id), 0)
-        const cap = pCircs.reduce((s, c) => s + circuitCapacityW(c), 0)
-        return { ph, load, cap }
+        const circs = distro.circuits.filter((c) => c.phase === ph)
+        return {
+          ph,
+          load: circs.reduce((s, c) => s + computeCircuitLoad(fixtures, c.id), 0),
+          cap: circs.reduce((s, c) => s + circuitCapacityW(c), 0),
+        }
       })
       const maxLoad = Math.max(...byPhase.map((b) => b.load), 1)
       const imbalance = (maxLoad - Math.min(...byPhase.map((b) => b.load))) / maxLoad * 100
 
       const phW = (totalW - 4) / 3
-      const phColors: [number,number,number][] = [[180,140,40],[50,130,200],[140,60,200]]
+      const phColors: RGB[] = [[180, 140, 40], [50, 130, 200], [140, 60, 200]]
       byPhase.forEach(({ ph, load, cap }, i) => {
         const bx = MARGIN + i * (phW + 2)
         rgb(pdf, C.faint, 'fill')
-        pdf.roundedRect(bx, y, phW, 12, 1, 1, 'F')
+        pdf.roundedRect(bx, r.y, phW, 12, 1, 1, 'F')
         rgb(pdf, phColors[i], 'text')
         pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
-        pdf.text(`L${ph}`, bx + 2.5, y + 5)
+        pdf.text(`L${ph}`, bx + 2.5, r.y + 5)
         rgb(pdf, C.ink, 'text')
         pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-        pdf.text(kw(load), bx + 10, y + 5)
-        const pp = cap > 0 ? Math.round(load / cap * 100) : 0
+        pdf.text(kw(load), bx + 10, r.y + 5)
         rgb(pdf, C.light, 'text'); pdf.setFontSize(5.5)
-        pdf.text(`${kw(cap)} cap · ${pp}%`, bx + 2.5, y + 9.5)
+        pdf.text(`${kw(cap)} cap · ${cap > 0 ? Math.round(load / cap * 100) : 0}%`, bx + 2.5, r.y + 9.5)
       })
-      y += 14
+      r.y += 14
       if (imbalance > 15) {
         rgb(pdf, C.amber, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-        pdf.text(`⚠ Phase imbalance: ${imbalance.toFixed(0)}% — consider re-balancing circuits`, MARGIN + 2, y + 4)
-        y += 7
+        pdf.text(`! Phase imbalance: ${imbalance.toFixed(0)}% — consider re-balancing circuits`, MARGIN + 2, r.y + 4)
+        r.y += 7
       }
     }
 
-    // Circuit cols
     const hasPhase = distro.phases === 3
-    const cCols = hasPhase
-      ? [{ label: 'CIRCUIT', w: 18 }, { label: 'PH', w: 11 }, { label: 'FIXTURES', w: 0 }, { label: 'LOAD', w: 22 }, { label: 'RATING', w: 16 }, { label: 'FREE', w: 18 }]
-      : [{ label: 'CIRCUIT', w: 18 },                          { label: 'FIXTURES', w: 0 }, { label: 'LOAD', w: 22 }, { label: 'RATING', w: 16 }, { label: 'FREE', w: 18 }]
-    const fxColIdx = hasPhase ? 2 : 1
-    cCols[fxColIdx].w = totalW - cCols.filter((_, i) => i !== fxColIdx).reduce((s, c) => s + c.w, 0)
+    const cCols: Col[] = hasPhase
+      ? [{ label: 'CIRCUIT', w: 20 }, { label: 'PH', w: 11 }, { label: 'FIXTURES', w: 0 }, { label: 'LOAD', w: 22, align: 'right' }, { label: 'RATING', w: 18, align: 'right' }, { label: 'FREE', w: 20, align: 'right' }]
+      : [{ label: 'CIRCUIT', w: 20 }, { label: 'FIXTURES', w: 0 }, { label: 'LOAD', w: 22, align: 'right' }, { label: 'RATING', w: 18, align: 'right' }, { label: 'FREE', w: 20, align: 'right' }]
+    const flex = hasPhase ? 2 : 1
+    fillColumn(cCols, flex, totalW)
 
-    y = tableHeader(pdf, MARGIN, y, cCols, totalW)
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cCols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, cCols, totalW)
 
     distro.circuits.forEach((c, i) => {
-      if (y > H - TITLE_BLOCK_H - 10) { pdf.addPage(); y = MARGIN + 4; y = tableHeader(pdf, MARGIN, y, cCols, totalW) }
+      ensureSpace(r, ROW_H)
       const load = computeCircuitLoad(fixtures, c.id)
       const cap = circuitCapacityW(c)
       const fxStr = fixtures.filter((f) => f.circuitId === c.id).map((f) => `CH${f.channel}`).join(' ') || '—'
       const ref = distro.ref ? `${distro.ref}·${i + 1}` : c.name
-      const cells = hasPhase
-        ? [ref, `L${c.phase}`, fxStr, load > 0 ? `${load.toFixed(0)} W` : '—', `${c.rating}A`, `${(cap - load).toFixed(0)} W`]
-        : [ref,                fxStr, load > 0 ? `${load.toFixed(0)} W` : '—', `${c.rating}A`, `${(cap - load).toFixed(0)} W`]
-      y = tableRow(pdf, MARGIN, y, cells, cCols, i % 2 === 0, totalW)
+      const free = cap - load
+      const cells = [ref, ...(hasPhase ? [`L${c.phase}`] : []), fxStr,
+        load > 0 ? `${load.toFixed(0)} W` : '—', `${c.rating}A`,
+        free < 0 ? `${free.toFixed(0)} W OVER` : `${free.toFixed(0)} W`]
+      const rowTop = r.y
+      r.y = tableRow(pdf, MARGIN, r.y, cells, cCols, i % 2 === 0, totalW)
+      if (free < 0) {
+        // Re-print the headroom cell in red: an overloaded circuit must shout.
+        const freeCol = cCols[cCols.length - 1]
+        rgb(pdf, C.red, 'fill')
+        pdf.rect(MARGIN + totalW - freeCol.w, rowTop, freeCol.w, ROW_H - 0.5, 'F')
+        rgb(pdf, C.white, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
+        pdf.text(`${free.toFixed(0)} W OVER`, MARGIN + totalW - 1.5, rowTop + 4, { align: 'right' })
+      }
     })
 
-    // Distro total footer
+    ensureSpace(r, 10)
     rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN, y, totalW, 6, 'F')
+    pdf.rect(MARGIN, r.y, totalW, 6, 'F')
     rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
-    pdf.text(`TOTAL  ${kw(directLoad)}  ·  capacity ${kw(capacity)}  ·  headroom ${kw(capacity - directLoad)}`, MARGIN + 3, y + 4)
-    y += 9
+    pdf.text(`TOTAL  ${kw(directLoad)}  ·  capacity ${kw(capacity)}  ·  headroom ${kw(capacity - directLoad)}`, MARGIN + 3, r.y + 4)
+    r.y += 10
+    r.repeatHeader = undefined
   }
 
-  drawTitleBlock(pdf, project, W, H, 'Power Report')
-  pdf.save(`${project.info.name}_Power_${formatVersion(project.version)}_${formatDate()}.pdf`)
+  return finishReport(r, 'Power')
 }
 
 // ── Groups PDF ────────────────────────────────────────────────────────────────
 
-export async function exportGroupsPDF(project: Project) {
-  const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-  const W = pdf.internal.pageSize.getWidth()
-  const H = pdf.internal.pageSize.getHeight()
-  const contentTop = MARGIN + 4
+export function buildGroupsPDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Groups')
+  const { pdf, W } = r
   const totalW = W - MARGIN * 2
-
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
-  rgb(pdf, C.ink, 'text')
-  pdf.text('GROUPS', MARGIN, contentTop + 8)
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(`${project.info.name}  ·  ${project.info.venue}  ·  v${formatVersion(project.version)}`, MARGIN, contentTop + 14)
-  rgb(pdf, C.blue, 'draw'); pdf.setLineWidth(0.8)
-  pdf.line(MARGIN, contentTop + 17, W - MARGIN, contentTop + 17)
-
   const { groups, fixtures } = project
-  let y = contentTop + 22
 
   if (groups.length === 0) {
-    rgb(pdf, C.light, 'text'); pdf.setFontSize(9)
-    pdf.text('No groups defined.', W / 2, y + 12, { align: 'center' })
-    drawTitleBlock(pdf, project, W, H, 'Groups')
-    pdf.save(`${project.info.name}_Groups_${formatVersion(project.version)}_${formatDate()}.pdf`)
-    return
+    emptyNote(r, 'No groups defined.')
+    return finishReport(r, 'Groups')
   }
 
-  const cols = [
-    { label: 'ID',          w: 10 },
-    { label: 'FIXTURE',     w: 0  },
-    { label: 'PATCH',       w: 20 },
-    { label: 'POWER',       w: 20 },
-    { label: 'WEIGHT',      w: 18 },
+  const cols: Col[] = [
+    { label: 'CH', w: 12 },
+    { label: 'FIXTURE', w: 0 },
+    { label: 'PATCH', w: 22 },
+    { label: 'POWER', w: 22, align: 'right' },
+    { label: 'WEIGHT', w: 22, align: 'right' },
   ]
-  cols[1].w = totalW - cols.filter((_, i) => i !== 1).reduce((s, c) => s + c.w, 0)
+  fillColumn(cols, 1, totalW)
 
   for (const g of groups) {
-    const members = fixtures.filter((f) => g.fixtureIds.includes(f.id))
+    const members = fixtures.filter((f) => g.fixtureIds.includes(f.id)).sort((a, b) => a.channel - b.channel)
     const totalPow = members.reduce((s, f) => s + f.powerRating, 0)
-    const totalWt  = members.reduce((s, f) => s + f.weight, 0)
+    const totalWt = members.reduce((s, f) => s + f.weight, 0)
 
-    if (y > H - TITLE_BLOCK_H - 30) { pdf.addPage(); y = MARGIN + 4 }
+    ensureSpace(r, 28)
 
-    // Group header
-    const hex = g.color
-    const gr = parseInt(hex.slice(1, 3), 16)
-    const gg = parseInt(hex.slice(3, 5), 16)
-    const gb = parseInt(hex.slice(5, 7), 16)
-    pdf.setFillColor(gr, gg, gb)
-    pdf.rect(MARGIN, y, 4, 10, 'F')
+    pdf.setFillColor(g.color || '#6b7280')
+    pdf.rect(MARGIN, r.y, 4, 10, 'F')
     rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN + 4, y, totalW - 4, 10, 'F')
+    pdf.rect(MARGIN + 4, r.y, totalW - 4, 10, 'F')
     rgb(pdf, C.ink, 'text')
     pdf.setFont('helvetica', BOLD); pdf.setFontSize(9)
-    pdf.text(g.name, MARGIN + 8, y + 5.5)
+    pdf.text(fit(pdf, g.name, totalW * 0.5), MARGIN + 8, r.y + 5.5)
     pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
     rgb(pdf, C.mid, 'text')
-    const summary = `${members.length} fixture${members.length !== 1 ? 's' : ''}  ·  ${(totalPow / 1000).toFixed(2)} kW  ·  ${totalWt.toFixed(1)} kg`
-    pdf.text(summary, W - MARGIN - 3, y + 5.5, { align: 'right' })
-    y += 10
+    pdf.text(
+      `${members.length} fixture${members.length !== 1 ? 's' : ''}  ·  ${(totalPow / 1000).toFixed(2)} kW  ·  ${totalWt.toFixed(1)} kg`,
+      W - MARGIN - 3, r.y + 5.5, { align: 'right' },
+    )
+    r.y += 10
 
     if (members.length === 0) {
-      rgb(pdf, C.light, 'text'); pdf.setFontSize(7)
-      pdf.text('No fixtures in this group.', MARGIN + 3, y + 4)
-      y += 8
+      rgb(pdf, C.light, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
+      pdf.text('No fixtures in this group.', MARGIN + 3, r.y + 4)
+      r.y += 8
       continue
     }
 
-    y = tableHeader(pdf, MARGIN, y, cols, totalW)
-
-    members.sort((a, b) => a.channel - b.channel).forEach((f, i) => {
-      if (y > H - TITLE_BLOCK_H - 10) { pdf.addPage(); y = MARGIN + 4; y = tableHeader(pdf, MARGIN, y, cols, totalW) }
-      y = tableRow(pdf, MARGIN, y, [
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW)
+    members.forEach((f, i) => {
+      ensureSpace(r, ROW_H)
+      r.y = tableRow(pdf, MARGIN, r.y, [
         String(f.channel),
         `${f.manufacturer}  ${f.model}`,
         `${f.universe}.${String(f.address).padStart(3, '0')}`,
@@ -844,9 +964,18 @@ export async function exportGroupsPDF(project: Project) {
         `${f.weight.toFixed(1)} kg`,
       ], cols, i % 2 === 0, totalW)
     })
-    y += 4
+    r.repeatHeader = undefined
+    r.y += 4
   }
 
-  drawTitleBlock(pdf, project, W, H, 'Groups')
-  pdf.save(`${project.info.name}_Groups_${formatVersion(project.version)}_${formatDate()}.pdf`)
+  return finishReport(r, 'Groups')
 }
+
+// ── Convenience wrappers ──────────────────────────────────────────────────────
+
+export function exportPlotPDF(project: Project, req?: PlotExportRequest) { savePdf(buildPlotPDF(project, req)) }
+export function exportPatchPDF(project: Project) { savePdf(buildPatchPDF(project)) }
+export function exportEquipmentPDF(project: Project) { savePdf(buildEquipmentPDF(project)) }
+export function exportCablePDF(project: Project) { savePdf(buildCablePDF(project)) }
+export function exportPowerPDF(project: Project) { savePdf(buildPowerPDF(project)) }
+export function exportGroupsPDF(project: Project) { savePdf(buildGroupsPDF(project)) }

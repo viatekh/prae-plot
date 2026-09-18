@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Plus, FolderOpen, Zap } from 'lucide-react'
-import { useProjectStore } from '../store/projectStore'
+import { Plus, FolderOpen, Zap, History, X } from 'lucide-react'
+import { useProjectStore, readAutosave, clearAutosave } from '../store/projectStore'
 import { loadJSONFile } from '../lib/utils'
 import type { ProjectInfo, Project } from '../types'
 
@@ -44,6 +44,8 @@ export default function HomePage() {
   const { createProject, loadProject } = useProjectStore()
   const [info, setInfo] = useState<ProjectInfo>(EMPTY_INFO)
   const [creating, setCreating] = useState(false)
+  const [autosave, setAutosave] = useState(() => readAutosave())
+  const [openError, setOpenError] = useState<string | null>(null)
 
   const upd = (field: keyof ProjectInfo) => (value: string) => setInfo((i) => ({ ...i, [field]: value }))
 
@@ -54,11 +56,26 @@ export default function HomePage() {
   }
 
   const handleOpen = async () => {
+    let data: object
     try {
-      const data = await loadJSONFile()
-      loadProject(data as Project)
-      navigate('/editor')
-    } catch { /* cancelled */ }
+      data = await loadJSONFile()
+    } catch {
+      return // cancelled, or unreadable file
+    }
+    const project = data as Project
+    if (!project?.info || !Array.isArray(project.fixtures) || !Array.isArray(project.elements)) {
+      setOpenError('That file is not a Prae Plot project.')
+      return
+    }
+    setOpenError(null)
+    loadProject(project)
+    navigate('/editor')
+  }
+
+  const handleRestore = () => {
+    if (!autosave) return
+    loadProject(autosave.project)
+    navigate('/editor')
   }
 
   return (
@@ -122,7 +139,40 @@ export default function HomePage() {
             </div>
           </div>
         ) : (
-          <div className='grid grid-cols-2 gap-4'>
+          <div className='flex flex-col gap-4'>
+            {autosave && (
+              <div className='flex items-center gap-3 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3'>
+                <History size={18} className='text-amber-600 shrink-0' />
+                <div className='flex-1 min-w-0'>
+                  <div className='text-sm font-medium text-gray-800 truncate'>
+                    Unsaved work: {autosave.project.info.name || 'Untitled project'}
+                  </div>
+                  <div className='text-xs text-gray-500'>
+                    Autosaved{autosave.savedAt ? ` ${new Date(autosave.savedAt).toLocaleString()}` : ''}
+                    {' · '}{autosave.project.fixtures.length} fixtures
+                  </div>
+                </div>
+                <button
+                  onClick={handleRestore}
+                  className='text-xs font-medium bg-amber-600 text-white px-3 py-1.5 rounded-lg hover:bg-amber-700 transition-colors shrink-0'
+                >
+                  Restore
+                </button>
+                <button
+                  title='Discard autosave'
+                  onClick={() => { clearAutosave(); setAutosave(null) }}
+                  className='text-amber-400 hover:text-amber-700 transition-colors shrink-0'
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            )}
+
+            {openError && (
+              <div className='text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-4 py-2'>{openError}</div>
+            )}
+
+            <div className='grid grid-cols-2 gap-4'>
             <button
               onClick={() => setCreating(true)}
               className='bg-white border border-gray-200 rounded-2xl p-8 flex flex-col items-center gap-3 hover:border-blue-300 hover:shadow-md transition-all group'
@@ -148,6 +198,7 @@ export default function HomePage() {
                 <div className='text-sm text-gray-400 mt-1'>Load a .json file</div>
               </div>
             </button>
+            </div>
           </div>
         )}
       </div>

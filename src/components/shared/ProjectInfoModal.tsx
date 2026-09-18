@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { X, Upload } from 'lucide-react'
 import { useProjectStore } from '../../store/projectStore'
 import type { ProjectInfo } from '../../types'
@@ -63,20 +63,21 @@ function LogoUpload({ label, value, onChange }: { label: string; value?: string;
 }
 
 export default function ProjectInfoModal() {
-  const { project, projectInfoModalOpen, setProjectInfoModalOpen, updateProjectInfo } = useProjectStore()
-  const [form, setForm] = useState<ProjectInfo | null>(null)
+  const { project, projectInfoModalOpen } = useProjectStore()
+  if (!projectInfoModalOpen || !project) return null
+  // Mounting the form only while the dialog is open seeds it from the project
+  // once, instead of re-seeding it on every unrelated store update.
+  return <ProjectInfoForm initial={project.info} />
+}
 
-  useEffect(() => {
-    if (projectInfoModalOpen && project) setForm({ ...project.info })
-  }, [projectInfoModalOpen, project])
-
-  if (!projectInfoModalOpen || !form) return null
+function ProjectInfoForm({ initial }: { initial: ProjectInfo }) {
+  const { setProjectInfoModalOpen, updateProjectInfo } = useProjectStore()
+  const [form, setForm] = useState<ProjectInfo>({ ...initial })
 
   const upd = (field: keyof ProjectInfo) => (value: string | undefined) =>
-    setForm((f) => f ? { ...f, [field]: value } : f)
+    setForm((f) => ({ ...f, [field]: value }))
 
   const handleSave = () => {
-    if (!form) return
     updateProjectInfo(form)
     setProjectInfoModalOpen(false)
   }

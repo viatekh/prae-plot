@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Eye, EyeOff, Lock, Unlock, Plus, Trash2, GripVertical, Image } from 'lucide-react'
+import { Eye, EyeOff, Lock, Unlock, Plus, Trash2, ChevronUp, ChevronDown, Image } from 'lucide-react'
 import { useProjectStore } from '../../store/projectStore'
 import type { Layer } from '../../types'
 import { cn } from '../../lib/utils'
@@ -16,7 +16,6 @@ function BgImageRow() {
 
   return (
     <div className='group flex items-center gap-2 px-2 py-1.5 border-b border-gray-100 bg-amber-50'>
-      <GripVertical size={12} className='text-gray-200 shrink-0' />
       <Image size={12} className='text-amber-500 shrink-0' />
       <div className='flex-1 min-w-0'>
         <div className='text-xs font-medium text-gray-700 truncate'>Background Image</div>
@@ -44,8 +43,10 @@ function BgImageRow() {
   )
 }
 
-function LayerRow({ layer, isActive, onSelect }: { layer: Layer; isActive: boolean; onSelect: () => void }) {
-  const { updateLayer, deleteLayer, project } = useProjectStore()
+function LayerRow({ layer, isActive, isFirst, isLast, onSelect }: {
+  layer: Layer; isActive: boolean; isFirst: boolean; isLast: boolean; onSelect: () => void
+}) {
+  const { updateLayer, deleteLayer, moveLayer, project } = useProjectStore()
   const [editingName, setEditingName] = useState(false)
 
   const elementCount = (project?.elements.filter((e) => e.layerId === layer.id).length ?? 0) +
@@ -59,7 +60,24 @@ function LayerRow({ layer, isActive, onSelect }: { layer: Layer; isActive: boole
         isActive ? 'bg-blue-50 border-l-2 border-l-blue-500' : 'hover:bg-gray-50',
       )}
     >
-      <GripVertical size={12} className='text-gray-300 shrink-0' />
+      <div className='flex flex-col shrink-0 -my-1' onClick={(e) => e.stopPropagation()}>
+        <button
+          title='Move up'
+          disabled={isFirst}
+          onClick={() => moveLayer(layer.id, 'up')}
+          className='text-gray-300 hover:text-gray-600 disabled:opacity-30 disabled:hover:text-gray-300 transition-colors'
+        >
+          <ChevronUp size={11} />
+        </button>
+        <button
+          title='Move down'
+          disabled={isLast}
+          onClick={() => moveLayer(layer.id, 'down')}
+          className='text-gray-300 hover:text-gray-600 disabled:opacity-30 disabled:hover:text-gray-300 transition-colors'
+        >
+          <ChevronDown size={11} />
+        </button>
+      </div>
 
       <input
         type='color'
@@ -102,7 +120,7 @@ function LayerRow({ layer, isActive, onSelect }: { layer: Layer; isActive: boole
           {layer.visible ? <Eye size={12} /> : <EyeOff size={12} className='text-gray-300' />}
         </button>
         <button
-          title={layer.locked ? 'Unlock layer' : 'Lock layer'}
+          title={layer.locked ? 'Unlock layer' : 'Lock layer — stays visible, cannot be edited'}
           onClick={() => updateLayer(layer.id, { locked: !layer.locked })}
           className='p-0.5 text-gray-400 hover:text-gray-700 transition-colors'
         >
@@ -111,7 +129,7 @@ function LayerRow({ layer, isActive, onSelect }: { layer: Layer; isActive: boole
         <button
           title='Delete layer'
           onClick={() => {
-            if (elementCount > 0 && !window.confirm(`Delete layer "${layer.name}"? ${elementCount} items on this layer will lose their layer assignment.`)) return
+            if (elementCount > 0 && !window.confirm(`Delete layer "${layer.name}"?\n\n${elementCount} item${elementCount !== 1 ? 's' : ''} stay on the plot but lose their layer assignment.`)) return
             deleteLayer(layer.id)
           }}
           className='p-0.5 text-gray-300 hover:text-red-400 transition-colors'
@@ -144,17 +162,23 @@ export default function LayersPanel() {
         </button>
       </div>
 
+      <div className='px-2 py-1 border-b border-gray-100 text-xs text-gray-400'>
+        Top of the list draws first; later layers sit on top.
+      </div>
+
       <div className='flex-1 overflow-y-auto'>
         <BgImageRow />
 
         {layers.length === 0 && !project.backgroundImage && (
           <div className='p-4 text-center text-xs text-gray-400'>No layers. Add one to organise your plot.</div>
         )}
-        {layers.map((layer) => (
+        {layers.map((layer, i) => (
           <LayerRow
             key={layer.id}
             layer={layer}
             isActive={layer.id === activeLayerId}
+            isFirst={i === 0}
+            isLast={i === layers.length - 1}
             onSelect={() => setActiveLayerId(layer.id)}
           />
         ))}

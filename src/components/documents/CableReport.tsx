@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useProjectStore } from '../../store/projectStore'
 import type { CableElement, CableType } from '../../types'
 import { CABLE_COLORS, CABLE_LABELS } from '../../types'
+import { cableLength } from '../../lib/utils'
 
 // Standard rental lengths in metres, grouped by cable family
 const POWER_LENGTHS  = [1, 2, 5, 10, 20]
@@ -76,14 +77,6 @@ export default function CableReport() {
     const dx = distros.find((d) => d.id === id)
     if (dx) return dx.ref ? `[${dx.ref}] ${dx.name}` : dx.name
     return '—'
-  }
-
-  const cableLength = (c: CableElement): number => {
-    if (c.manualLength != null) return c.manualLength
-    const pts = [{ x: c.x, y: c.y }, ...(c.waypoints ?? []), { x: c.x2, y: c.y2 }]
-    let len = 0
-    for (let i = 1; i < pts.length; i++) len += Math.sqrt((pts[i].x - pts[i-1].x)**2 + (pts[i].y - pts[i-1].y)**2)
-    return len
   }
 
   const runs: RunRow[] = cables.map((c) => {

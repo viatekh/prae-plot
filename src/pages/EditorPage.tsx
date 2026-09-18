@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import {
   Save, ChevronLeft, Download, FolderOpen, LayoutTemplate, BookOpen,
   MousePointer2, Hand, Square, Pentagon, Circle, Type, Zap, Bolt,
@@ -7,7 +7,8 @@ import {
 } from 'lucide-react'
 import { useProjectStore } from '../store/projectStore'
 import { formatVersion, loadImageFile } from '../lib/utils'
-import ExportModal from '../components/shared/ExportModal'
+// Loaded on demand — it pulls in jsPDF, which is most of the bundle.
+const ExportModal = lazy(() => import('../components/shared/ExportModal'))
 import type { Project } from '../types'
 import PlotCanvas from '../components/canvas/PlotCanvas'
 import FixtureLibrary from '../components/panels/FixtureLibrary'
@@ -95,12 +96,24 @@ export default function EditorPage() {
   const leftDrawerBase = useRef(240)
   const rightBase = useRef(280)
 
-  // Autosave
+  // Autosave: on a timer, when the tab is hidden, and before the page unloads.
   useEffect(() => {
-    const id = setInterval(() => {
+    const autosaveIfDirty = () => {
       if (useProjectStore.getState().isDirty) useProjectStore.getState().autosave()
-    }, 120_000)
-    return () => clearInterval(id)
+    }
+    const id = setInterval(autosaveIfDirty, 30_000)
+    const onHide = () => { if (document.visibilityState === 'hidden') autosaveIfDirty() }
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      autosaveIfDirty()
+      if (useProjectStore.getState().isDirty) e.preventDefault()
+    }
+    document.addEventListener('visibilitychange', onHide)
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onHide)
+      window.removeEventListener('beforeunload', onBeforeUnload)
+    }
   }, [])
 
   const handleImport = () => {
@@ -111,7 +124,7 @@ export default function EditorPage() {
       if (!file) return
       try {
         const imported = JSON.parse(await file.text()) as Project
-        if (!Array.isArray(imported.fixtures) || !Array.isArray(imported.elements)) throw new Error()
+        if (!Array.isArray(imported.fixtures) || !Array.isArray(imported.elements)) throw new Error('not a project')
         mergeProject(imported)
       } catch { alert('Could not import: invalid project file.') }
     }
@@ -144,7 +157,11 @@ export default function EditorPage() {
   return (
     <div className='flex flex-col h-screen overflow-hidden bg-gray-100'>
       <ProjectInfoModal />
-      {showExport && <ExportModal project={project} onClose={() => setShowExport(false)} />}
+      {showExport && (
+        <Suspense fallback={null}>
+          <ExportModal project={project} onClose={() => setShowExport(false)} />
+        </Suspense>
+      )}
 
       {/* ── Top bar ──────────────────────────────────────────── */}
       <header className='h-11 bg-gray-900 flex items-center px-3 gap-2 shrink-0'>

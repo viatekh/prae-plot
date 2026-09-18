@@ -16,9 +16,11 @@ import type {
   Device,
   FixtureGroup,
 } from '../types'
-import { DEFAULT_LAYERS } from '../types'
+import { DEFAULT_LAYERS, isPowerCable } from '../types'
 
 const MAX_HISTORY = 50
+const AUTOSAVE_KEY = 'prae-plot:autosave'
+const AUTOSAVE_TIME_KEY = 'prae-plot:autosave-time'
 
 interface HistoryEntry {
   elements: AnyElement[]
@@ -92,6 +94,8 @@ interface ProjectStore {
   updateLayer: (id: string, updates: Partial<Layer>) => void
   deleteLayer: (id: string) => void
   reorderLayers: (layers: Layer[]) => void
+  /** Moves a layer one step up or down the stack, renumbering `order`. */
+  moveLayer: (id: string, direction: 'up' | 'down') => void
 
   // ── Actions: distros/circuits ─────────────────────────────
   addDistro: (d: Omit<Distro, 'id'> & { circuits?: Distro['circuits'] }) => void
@@ -285,11 +289,11 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     const { project } = get()
     if (!project) return
     try {
-      localStorage.setItem('prae-plot:autosave', JSON.stringify(project))
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(project))
       const ts = new Date().toISOString()
-      localStorage.setItem('prae-plot:autosave-time', ts)
+      localStorage.setItem(AUTOSAVE_TIME_KEY, ts)
       set({ lastAutosave: ts })
-    } catch { /* quota */ }
+    } catch { /* quota exceeded — the manual save still works */ }
   },
 
   pushHistory: () => {
@@ -309,8 +313,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     let fixtures = project.fixtures
     if (el.type === 'cable') {
       const ce = el as { startConnectedTo?: string; endConnectedTo?: string; cableType: string }
-      const POWER_CABLE_TYPES: string[] = ['power-13a', 'power-16a', 'power-32a', 'power-63a', 'power-125a', 'iec', 'true1-in', 'true1-out', 'powercon-blue', 'powercon-grey', 'cee17-32a', 'cee17-63a', 'cee17-125a', 'soca', 'socapex']
-      if (POWER_CABLE_TYPES.includes(ce.cableType)) {
+      if (isPowerCable(ce.cableType)) {
         // Find which end is fixture and which is distro
         const fixtureId = fixtures.find((f) => f.id === ce.startConnectedTo)?.id
           ?? fixtures.find((f) => f.id === ce.endConnectedTo)?.id
@@ -418,7 +421,36 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   deleteLayer: (id) => {
     const { project } = get()
     if (!project) return
-    set({ project: { ...project, layers: project.layers.filter((l) => l.id !== id) }, isDirty: true })
+    // Items keep existing; they just lose the layer that no longer exists.
+    const clear = <T extends { layerId?: string }>(item: T): T =>
+      item.layerId === id ? { ...item, layerId: undefined } : item
+    set({
+      project: {
+        ...project,
+        layers: project.layers.filter((l) => l.id !== id).map((l, i) => ({ ...l, order: i })),
+        elements: project.elements.map(clear),
+        fixtures: project.fixtures.map(clear),
+        distros: project.distros.map(clear),
+        devices: project.devices.map(clear),
+      },
+      activeLayerId: get().activeLayerId === id ? (project.layers.find((l) => l.id !== id)?.id ?? '') : get().activeLayerId,
+      isDirty: true,
+    })
+  },
+
+  moveLayer: (id, direction) => {
+    const { project } = get()
+    if (!project) return
+    const sorted = [...project.layers].sort((a, b) => a.order - b.order)
+    const idx = sorted.findIndex((l) => l.id === id)
+    const target = idx + (direction === 'up' ? -1 : 1)
+    if (idx === -1 || target < 0 || target >= sorted.length) return
+    const [moved] = sorted.splice(idx, 1)
+    sorted.splice(target, 0, moved)
+    set({
+      project: { ...project, layers: sorted.map((l, i) => ({ ...l, order: i })) },
+      isDirty: true,
+    })
   },
 
   reorderLayers: (layers) => {
@@ -727,6 +759,34 @@ try {
   }
 } catch { /* ignore */ }
 
+// ── Autosave recovery ─────────────────────────────────────────
+// The editor autosaves to localStorage; without this the snapshot was written
+// but could never be read back.
+
+export interface AutosaveSnapshot {
+  project: Project
+  savedAt: string | null
+}
+
+export function readAutosave(): AutosaveSnapshot | null {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY)
+    if (!raw) return null
+    const project = JSON.parse(raw) as Project
+    if (!project?.info || !Array.isArray(project.fixtures)) return null
+    return { project, savedAt: localStorage.getItem(AUTOSAVE_TIME_KEY) }
+  } catch {
+    return null
+  }
+}
+
+export function clearAutosave() {
+  try {
+    localStorage.removeItem(AUTOSAVE_KEY)
+    localStorage.removeItem(AUTOSAVE_TIME_KEY)
+  } catch { /* storage unavailable */ }
+}
+
 // ── Derived helpers ───────────────────────────────────────────
 
 export function computeCircuitLoad(fixtures: PlacedFixture[], circuitId: string): number {
@@ -746,7 +806,7 @@ export function computeDistroLoad(
   distro: Distro,
   allDistros: Distro[],
   fixtures: PlacedFixture[],
-  elements: { type: string; startConnectedTo?: string; endConnectedTo?: string }[],
+  elements: { type: string; cableType?: string; startConnectedTo?: string; endConnectedTo?: string }[],
   visited = new Set<string>(),
 ): number {
   if (visited.has(distro.id)) return 0
@@ -755,7 +815,7 @@ export function computeDistroLoad(
   const directLoad = distro.circuits.reduce((sum, c) => sum + computeCircuitLoad(fixtures, c.id), 0)
   // Find downstream distros connected via power cables
   const downstreamIds = elements
-    .filter((e) => e.type === 'cable')
+    .filter((e) => e.type === 'cable' && isPowerCable(e.cableType ?? ''))
     .filter((e) => e.startConnectedTo === distro.id || e.endConnectedTo === distro.id)
     .map((e) => e.startConnectedTo === distro.id ? e.endConnectedTo : e.startConnectedTo)
     .filter((id): id is string => !!id && id !== distro.id)

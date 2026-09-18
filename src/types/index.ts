@@ -368,6 +368,17 @@ export const CABLE_LABELS: Record<CableType, string> = {
   other:            'Other',
 }
 
+/** Cable types that actually carry mains power. */
+export const POWER_CABLE_TYPES: CableType[] = [
+  'power-13a', 'power-16a', 'power-32a', 'power-63a', 'power-125a',
+  'iec', 'true1-in', 'true1-out', 'powercon-blue', 'powercon-grey',
+  'cee17-32a', 'cee17-63a', 'cee17-125a', 'soca', 'socapex',
+]
+
+export function isPowerCable(type: string): boolean {
+  return (POWER_CABLE_TYPES as string[]).includes(type)
+}
+
 // Cable groups for display in picker
 export const CABLE_GROUPS: { label: string; types: CableType[] }[] = [
   { label: 'DMX / Data', types: ['dmx-5pin', 'dmx-3pin', 'ethernet', 'cat6', 'fibre'] },
@@ -408,7 +419,7 @@ function ways1ph(count: number, rating: number, prefix = 'W'): DistroPreset['cir
     name: `${prefix}${i + 1}`,
     rating,
     voltage: 230,
-    phase: 1 as 1,
+    phase: 1 as const,
   }))
 }
 
