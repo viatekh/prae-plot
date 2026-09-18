@@ -217,13 +217,26 @@ function lighten(rgb: RGB, amount: number): RGB {
   return rgb.map((c) => Math.round(c + (255 - c) * amount)) as RGB
 }
 
-/** Blends a colour towards black. */
-function darken(rgb: RGB, amount: number): RGB {
-  return rgb.map((c) => Math.round(c * (1 - amount))) as RGB
-}
-
 const INK: RGB = [17, 24, 39]
-const MUTED: RGB = [107, 114, 128]
+const MUTED: RGB = [113, 122, 138]
+const HAIRLINE: RGB = [188, 195, 206]
+const PAPER_WHITE: RGB = [255, 255, 255]
+
+/**
+ * Pen table. A drawing reads properly only when line weights are ranked, the
+ * way a CAD pen set ranks them: sheet border heaviest, then built structure,
+ * then equipment, then annotation, then the grid underneath everything.
+ */
+export const PEN = {
+  border: 0.7,
+  frame: 0.25,
+  hair: 0.08,
+  archHeavy: 0.4,
+  archMed: 0.22,
+  archLight: 0.12,
+  anno: 0.1,
+  grid: 0.04,
+} as const
 
 // ── Low level drawing ─────────────────────────────────────────────────────────
 
@@ -248,12 +261,57 @@ function makeTransform(bounds: Bounds, frame: Rect, mmPerM: number): Transform {
 
 export interface Rect { x: number; y: number; w: number; h: number }
 
-function setDraw(pdf: jsPDF, c: RGB, lw: number) {
+export function setDraw(pdf: jsPDF, c: RGB, lw: number) {
   pdf.setDrawColor(c[0], c[1], c[2])
   pdf.setLineWidth(lw)
 }
-function setFill(pdf: jsPDF, c: RGB) { pdf.setFillColor(c[0], c[1], c[2]) }
-function setText(pdf: jsPDF, c: RGB) { pdf.setTextColor(c[0], c[1], c[2]) }
+export function setFill(pdf: jsPDF, c: RGB) { pdf.setFillColor(c[0], c[1], c[2]) }
+export function setText(pdf: jsPDF, c: RGB) { pdf.setTextColor(c[0], c[1], c[2]) }
+
+export interface TextStyle {
+  size?: number
+  color?: RGB
+  bold?: boolean
+  /** Letter spacing in mm — drawing captions are traditionally tracked out. */
+  spacing?: number
+  align?: 'left' | 'center' | 'right'
+  /** Paints white behind the text so it stays readable over line work. */
+  backdrop?: boolean
+  maxW?: number
+}
+
+/** pt → mm */
+const PT = 0.3527
+
+export function drawText(pdf: jsPDF, text: string, x: number, y: number, style: TextStyle = {}) {
+  if (!text) return
+  const size = style.size ?? 5
+  pdf.setFont('helvetica', style.bold ? 'bold' : 'normal')
+  pdf.setFontSize(size)
+  if (style.spacing) pdf.setCharSpace(style.spacing)
+
+  let out = text
+  if (style.maxW) out = fitText(pdf, text, style.maxW, style.spacing ?? 0)
+
+  if (style.backdrop) {
+    const w = pdf.getTextWidth(out) + (style.spacing ?? 0) * out.length
+    const h = size * PT
+    const x0 = style.align === 'center' ? x - w / 2 : style.align === 'right' ? x - w : x
+    setFill(pdf, PAPER_WHITE)
+    pdf.rect(x0 - 0.35, y - h * 0.82, w + 0.7, h * 1.08, 'F')
+  }
+
+  setText(pdf, style.color ?? INK)
+  pdf.text(out, x, y, { align: style.align ?? 'left' })
+  if (style.spacing) pdf.setCharSpace(0)
+}
+
+/** Small tracked-out uppercase caption, as used on every cell of a title block. */
+export function drawCaption(pdf: jsPDF, text: string, x: number, y: number, style: TextStyle = {}) {
+  drawText(pdf, text.toUpperCase(), x, y, {
+    size: 4.6, color: MUTED, spacing: 0.28, ...style,
+  })
+}
 
 /** Draws a polyline/polygon from flat [x0,y0,x1,y1,…] paper coordinates. */
 function polyline(pdf: jsPDF, pts: number[], style: 'S' | 'F' | 'FD' | null, closed = false) {
@@ -288,13 +346,14 @@ function withOpacity(pdf: jsPDF, opacity: number, body: () => void) {
 }
 
 /** Truncates text with an ellipsis so it fits `maxW` mm at the current font. */
-export function fitText(pdf: jsPDF, text: string, maxW: number): string {
-  if (!text) return ''
-  if (pdf.getTextWidth(text) <= maxW) return text
+export function fitText(pdf: jsPDF, text: string, maxW: number, spacing = 0): string {
+  if (!text || maxW <= 0) return ''
+  const width = (s: string) => pdf.getTextWidth(s) + spacing * s.length
+  if (width(text) <= maxW) return text
   let lo = 0, hi = text.length
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2)
-    if (pdf.getTextWidth(text.slice(0, mid) + '…') <= maxW) lo = mid
+    if (width(text.slice(0, mid) + '…') <= maxW) lo = mid
     else hi = mid - 1
   }
   return lo > 0 ? text.slice(0, lo) + '…' : ''
@@ -326,7 +385,7 @@ export function drawFixtureSymbol(
 
   const paint = (role?: FillRole): RGB | null => {
     switch (role) {
-      case 'body': return [255, 255, 255]
+      case 'body': return PAPER_WHITE
       case 'accent': return accent
       case 'tint': return lighten(typeFill, 0.66)
       case 'type': return typeFill
@@ -360,18 +419,27 @@ export function drawFixtureSymbol(
 
 // ── The drawing ───────────────────────────────────────────────────────────────
 
-export interface PlotRenderResult {
-  scale: ScaleChoice
-  bounds: Bounds | null
-  /** Fixture types present, for the legend and for reporting back to the UI. */
-  legendItems: LegendItem[]
-}
-
 export interface LegendItem {
   key: string
   label: string
   symbol: FixtureSymbolType
   count: number
+  watts: number
+  weight: number
+}
+
+export interface PlotRenderResult {
+  scale: ScaleChoice
+  bounds: Bounds | null
+  legendItems: LegendItem[]
+  cableTypes: CableType[]
+  /** Totals for the instrument summary. */
+  totals: { count: number; watts: number; weight: number }
+}
+
+/** 630 W / 6.3 kW — schedules read better when the unit follows the magnitude. */
+function formatWatts(w: number): string {
+  return w >= 1000 ? `${(w / 1000).toFixed(1)} kW` : `${Math.round(w)} W`
 }
 
 function legendItemsFor(content: PlotContent): LegendItem[] {
@@ -379,8 +447,13 @@ function legendItemsFor(content: PlotContent): LegendItem[] {
   for (const f of content.fixtures) {
     const key = `${f.manufacturer} ${f.model}`.trim() || 'Fixture'
     const item = map.get(key)
-    if (item) item.count += 1
-    else map.set(key, { key, label: key, symbol: f.symbol, count: 1 })
+    if (item) {
+      item.count += 1
+      item.watts += f.powerRating
+      item.weight += f.weight
+    } else {
+      map.set(key, { key, label: key, symbol: f.symbol, count: 1, watts: f.powerRating, weight: f.weight })
+    }
   }
   return [...map.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label))
 }
@@ -407,12 +480,17 @@ export function drawPlot(
 ): PlotRenderResult {
   const bounds = sharedBounds ?? contentBounds(content)
   const legendItems = legendItemsFor(content)
+  const totals = legendItems.reduce(
+    (acc, i) => ({ count: acc.count + i.count, watts: acc.watts + i.watts, weight: acc.weight + i.weight }),
+    { count: 0, watts: 0, weight: 0 },
+  )
+  const base = { legendItems, cableTypes: cableTypesIn(content), totals }
 
   if (!bounds) {
-    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9)
-    setText(pdf, MUTED)
-    pdf.text('Nothing to draw on the selected layers.', frame.x + frame.w / 2, frame.y + frame.h / 2, { align: 'center' })
-    return { scale: { mmPerM: 20, denominator: 50, standard: true, overflow: false }, bounds: null, legendItems }
+    drawText(pdf, 'Nothing to draw on the selected layers.', frame.x + frame.w / 2, frame.y + frame.h / 2, {
+      size: 8, color: MUTED, align: 'center',
+    })
+    return { ...base, scale: { mmPerM: 20, denominator: 50, standard: true, overflow: false }, bounds: null }
   }
 
   const scale = chooseScale(bounds, frame.w, frame.h, opts.scale)
@@ -426,7 +504,7 @@ export function drawPlot(
     drawFixtures(pdf, content.fixtures, project, t, opts)
   })
 
-  return { scale, bounds, legendItems }
+  return { ...base, scale, bounds }
 }
 
 function drawBackground(pdf: jsPDF, bg: BackgroundImage, t: Transform) {
@@ -453,21 +531,24 @@ function drawGrid(pdf: jsPDF, bounds: Bounds, t: Transform, gridSize: number) {
 
   for (let wx = first(bounds.minX); wx <= bounds.maxX; wx += step) {
     const major = Math.abs(wx / (step * 5) - Math.round(wx / (step * 5))) < 1e-6
-    setDraw(pdf, major ? [203, 213, 225] : [233, 238, 244], major ? 0.12 : 0.07)
+    setDraw(pdf, major ? [206, 213, 224] : [234, 238, 244], major ? PEN.grid * 2.5 : PEN.grid)
     pdf.line(t.x(wx), y0, t.x(wx), y1)
   }
   for (let wy = first(bounds.minY); wy <= bounds.maxY; wy += step) {
     const major = Math.abs(wy / (step * 5) - Math.round(wy / (step * 5))) < 1e-6
-    setDraw(pdf, major ? [203, 213, 225] : [233, 238, 244], major ? 0.12 : 0.07)
+    setDraw(pdf, major ? [206, 213, 224] : [234, 238, 244], major ? PEN.grid * 2.5 : PEN.grid)
     pdf.line(x0, t.y(wy), x1, t.y(wy))
   }
 
-  // Origin marker
+  // Survey origin marker
   if (bounds.minX <= 0 && bounds.maxX >= 0 && bounds.minY <= 0 && bounds.maxY >= 0) {
-    setDraw(pdf, [100, 116, 139], 0.25)
-    const len = Math.min(8, 1 * t.mmPerM)
-    pdf.line(t.x(0), t.y(0), t.x(0) + len, t.y(0))
-    pdf.line(t.x(0), t.y(0), t.x(0), t.y(0) + len)
+    const ox = t.x(0), oy = t.y(0)
+    setDraw(pdf, [120, 132, 150], PEN.archLight)
+    const len = Math.min(9, 1 * t.mmPerM)
+    pdf.line(ox - len * 0.35, oy, ox + len, oy)
+    pdf.line(ox, oy - len * 0.35, ox, oy + len)
+    pdf.circle(ox, oy, 0.9, 'S')
+    drawCaption(pdf, '0,0', ox + 1.4, oy - 1.4, { size: 4, color: [140, 150, 164] })
   }
 }
 
@@ -483,8 +564,10 @@ function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Tra
   for (const el of content.elements) {
     const stroke = elementStroke(el, project, opts.colorByLayer)
     const transparent = el.fill === '' || el.fill === 'transparent'
-    const fill = transparent ? null : hexToRgb(el.fill || '#d1d5db')
-    const lw = Math.max(0.15, (el.strokeWidth || 1) * 0.18)
+    // Built structure prints as pale tone with a heavy outline, the way a plan
+    // shows the stage rather than a filled block that fights the fixtures.
+    const fill = transparent ? null : lighten(hexToRgb(el.fill || '#d1d5db'), 0.55)
+    const lw = el.strokeWidth >= 2 ? PEN.archHeavy : PEN.archMed
 
     if (el.type === 'rect') {
       const r = el as RectElement
@@ -523,49 +606,73 @@ function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Tra
       drawCable(pdf, el as CableElement, t, opts)
     } else if (el.type === 'text') {
       const tx = el as TextElement
-      setText(pdf, hexToRgb(tx.fill || '#1f2937'))
-      pdf.setFont('helvetica', 'normal')
-      pdf.setFontSize(Math.max(4, Math.min(12, (tx.fontSize || 14) * 0.5)))
-      pdf.text(tx.text, t.x(tx.x), t.y(tx.y), tx.rotation ? { angle: -tx.rotation } : undefined)
+      drawText(pdf, tx.text, t.x(tx.x), t.y(tx.y), {
+        size: Math.max(4.5, Math.min(11, (tx.fontSize || 14) * 0.5)),
+        color: hexToRgb(tx.fill || '#1f2937'),
+        spacing: 0.15,
+      })
     }
   }
 }
 
 function centreLabel(pdf: jsPDF, label: string, x: number, y: number) {
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(5.5)
-  setText(pdf, [55, 65, 81])
-  pdf.text(label, x, y, { align: 'center', baseline: 'middle' })
+  drawText(pdf, label.toUpperCase(), x, y, {
+    size: 5, color: [90, 99, 112], spacing: 0.4, align: 'center', backdrop: true,
+  })
 }
 
+/**
+ * Hanging positions print as real truss: two chords with diagonal bracing and
+ * end plates, plus a name tag. A single fat line reads as a wall, not a bar.
+ */
 function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform) {
   const x1 = t.x(te.x), y1 = t.y(te.y), x2 = t.x(te.x2), y2 = t.y(te.y2)
   const lengthM = Math.hypot(te.x2 - te.x, te.y2 - te.y)
+  const lengthMm = Math.hypot(x2 - x1, y2 - y1)
+  if (lengthMm < 0.5) return
 
-  // Chord
-  setDraw(pdf, stroke, 0.7)
-  pdf.setLineCap('round')
-  pdf.line(x1, y1, x2, y2)
-  pdf.setLineCap('butt')
+  const ux = (x2 - x1) / lengthMm, uy = (y2 - y1) / lengthMm
+  const nx = -uy, ny = ux
+  // A 0.3 m truss, but never thinner than a readable pair of lines.
+  const half = Math.max(0.55, Math.min(3, 0.15 * t.mmPerM))
 
-  // Ladder rungs every 0.5 m, as long as they stay readable
-  const rungSpacing = lengthM > 0 && 0.5 * t.mmPerM >= 1.2 ? 0.5 : 0
-  if (rungSpacing && lengthM > 0) {
-    const angle = Math.atan2(y2 - y1, x2 - x1)
-    const dx = Math.sin(angle) * 0.9
-    const dy = -Math.cos(angle) * 0.9
-    setDraw(pdf, stroke, 0.2)
-    for (let d = 0; d <= lengthM; d += rungSpacing) {
-      const f = d / lengthM
-      const hx = x1 + (x2 - x1) * f
-      const hy = y1 + (y2 - y1) * f
-      pdf.line(hx - dx, hy - dy, hx + dx, hy + dy)
+  setDraw(pdf, stroke, PEN.archHeavy)
+  pdf.line(x1 + nx * half, y1 + ny * half, x2 + nx * half, y2 + ny * half)
+  pdf.line(x1 - nx * half, y1 - ny * half, x2 - nx * half, y2 - ny * half)
+  // End plates
+  pdf.line(x1 + nx * half, y1 + ny * half, x1 - nx * half, y1 - ny * half)
+  pdf.line(x2 + nx * half, y2 + ny * half, x2 - nx * half, y2 - ny * half)
+
+  // Diagonal bracing — skipped once the bays would be smaller than the pen
+  const bay = Math.max(half * 2, 0.5 * t.mmPerM)
+  if (bay >= 1.2) {
+    setDraw(pdf, stroke, PEN.archLight)
+    let d = 0
+    let up = true
+    while (d + bay <= lengthMm) {
+      const ax = x1 + ux * d + nx * half * (up ? 1 : -1)
+      const ay = y1 + uy * d + ny * half * (up ? 1 : -1)
+      const bx = x1 + ux * (d + bay) + nx * half * (up ? -1 : 1)
+      const by = y1 + uy * (d + bay) + ny * half * (up ? -1 : 1)
+      pdf.line(ax, ay, bx, by)
+      d += bay
+      up = !up
     }
   }
 
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4.5)
-  setText(pdf, [55, 65, 81])
-  const label = [te.label, `${lengthM.toFixed(2)} m`].filter(Boolean).join('  ')
-  pdf.text(label, (x1 + x2) / 2, (y1 + y2) / 2 - 2.4, { align: 'center' })
+  // Position tag, set off the truss on the near side
+  const label = te.label || 'TRUSS'
+  const cx = (x1 + x2) / 2 - nx * (half + 3.2)
+  const cy = (y1 + y2) / 2 - ny * (half + 3.2)
+  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(5)
+  const tagW = pdf.getTextWidth(label.toUpperCase()) + 0.35 * label.length + 4
+  setFill(pdf, PAPER_WHITE)
+  setDraw(pdf, stroke, PEN.hair)
+  pdf.rect(cx - tagW / 2, cy - 2.2, tagW, 4.4, 'FD')
+  drawText(pdf, label.toUpperCase(), cx, cy + 0.9, { size: 5, bold: true, spacing: 0.35, align: 'center', color: stroke })
+  drawText(pdf, `${lengthM.toFixed(2)} m`, cx, cy - 3.4, {
+    size: 4.2, color: MUTED, align: 'center', spacing: 0.1,
+  })
 }
 
 function drawCable(pdf: jsPDF, ce: CableElement, t: Transform, opts: PlotOptions) {
@@ -573,24 +680,24 @@ function drawCable(pdf: jsPDF, ce: CableElement, t: Transform, opts: PlotOptions
   const color = hexToRgb(CABLE_COLORS[ce.cableType] ?? '#9ca3af')
   const paper = pts.flatMap((p) => [t.x(p.x), t.y(p.y)])
 
-  setDraw(pdf, color, 0.35)
-  pdf.setLineDashPattern([1.4, 0.9], 0)
+  setDraw(pdf, color, 0.3)
+  pdf.setLineDashPattern([1.6, 1], 0)
   pdf.setLineJoin('round')
   polyline(pdf, paper, 'S')
   pdf.setLineDashPattern([], 0)
 
-  // End dots
+  // Termination dots
   setFill(pdf, color)
-  pdf.circle(paper[0], paper[1], 0.5, 'F')
-  pdf.circle(paper[paper.length - 2], paper[paper.length - 1], 0.5, 'F')
+  pdf.circle(paper[0], paper[1], 0.55, 'F')
+  pdf.circle(paper[paper.length - 2], paper[paper.length - 1], 0.55, 'F')
 
   if (!opts.showCableLabels) return
-  const label = [ce.autoLabel, ce.annotation, `${cableLength(ce).toFixed(1)} m`].filter(Boolean).join(' · ')
+  const label = [ce.autoLabel, ce.annotation, `${cableLength(ce).toFixed(1)}m`].filter(Boolean).join(' · ')
   if (!label) return
   const mid = Math.floor(pts.length / 2)
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4)
-  setText(pdf, color)
-  pdf.text(label, t.x(pts[mid].x) + 0.8, t.y(pts[mid].y) - 0.8)
+  drawText(pdf, label, t.x(pts[mid].x) + 0.9, t.y(pts[mid].y) - 0.9, {
+    size: 4, color, backdrop: true, spacing: 0.06,
+  })
 }
 
 const DEVICE_COLORS: Record<string, string> = {
@@ -604,40 +711,47 @@ const DEVICE_COLORS: Record<string, string> = {
   'other': '#6b7280',
 }
 
+/**
+ * Equipment racks print as line work with a colour spine, not as solid blocks —
+ * a black-and-white print of the plot has to stay readable.
+ */
 function drawNodeBox(
-  pdf: jsPDF, cx: number, cy: number, w: number, h: number, bg: RGB, lines: [string, number, boolean][],
+  pdf: jsPDF, cx: number, cy: number, w: number, h: number, accent: RGB,
+  title: string, lines: string[],
 ) {
-  setFill(pdf, bg)
-  setDraw(pdf, darken(bg, 0.25), 0.2)
-  pdf.roundedRect(cx - w / 2, cy - h / 2, w, h, 0.5, 0.5, 'F')
-  let ty = cy - h / 2 + 2
-  for (const [text, size, bold] of lines) {
-    if (!text) continue
-    pdf.setFont('helvetica', bold ? 'bold' : 'normal')
-    pdf.setFontSize(size)
-    setText(pdf, [255, 255, 255])
-    pdf.text(fitText(pdf, text, w - 2), cx - w / 2 + 1, ty)
-    ty += size * 0.42 + 0.5
+  const x = cx - w / 2, y = cy - h / 2
+  setFill(pdf, PAPER_WHITE)
+  setDraw(pdf, INK, PEN.archMed)
+  pdf.rect(x, y, w, h, 'FD')
+  // Colour spine down the left edge
+  setFill(pdf, accent)
+  pdf.rect(x, y, 1.4, h, 'F')
+  // Title bar rule
+  setDraw(pdf, HAIRLINE, PEN.hair)
+  pdf.line(x + 1.4, y + 4.2, x + w, y + 4.2)
+
+  drawText(pdf, title, x + 2.6, y + 3, { size: 4.8, bold: true, spacing: 0.15, maxW: w - 3.6 })
+  let ty = y + 7.2
+  for (const text of lines) {
+    if (!text || ty > y + h - 0.6) continue
+    drawText(pdf, text, x + 2.6, ty, { size: 4, color: MUTED, maxW: w - 3.6 })
+    ty += 3.2
   }
 }
 
 function drawDistrosAndDevices(pdf: jsPDF, content: PlotContent, t: Transform) {
   for (const d of content.distros) {
-    const w = Math.max(14, Math.min(26, 1.6 * t.mmPerM))
-    const h = w * 0.55
-    drawNodeBox(pdf, t.x(d.x ?? 0), t.y(d.y ?? 0), w, h, [220, 38, 38], [
-      [d.ref ? `[${d.ref}] ${d.name}` : d.name, 4.5, true],
-      [`${d.incomingRating}A · ${d.phases}Ø`, 3.6, false],
-      [`${d.circuits.length} way${d.circuits.length !== 1 ? 's' : ''}`, 3.6, false],
-    ])
+    const w = Math.max(16, Math.min(28, 1.8 * t.mmPerM))
+    const h = Math.max(11, w * 0.5)
+    drawNodeBox(pdf, t.x(d.x ?? 0), t.y(d.y ?? 0), w, h, [220, 38, 38],
+      d.ref ? `${d.ref} · ${d.name}` : d.name,
+      [`${d.incomingRating}A · ${d.phases}Ø`, `${d.circuits.length} way${d.circuits.length !== 1 ? 's' : ''}`])
   }
   for (const d of content.devices) {
-    const w = Math.max(13, Math.min(24, 1.4 * t.mmPerM))
-    const h = w * 0.5
-    drawNodeBox(pdf, t.x(d.x ?? 0), t.y(d.y ?? 0), w, h, hexToRgb(DEVICE_COLORS[d.category] ?? '#6b7280'), [
-      [d.name, 4.2, true],
-      [d.manufacturer ?? '', 3.4, false],
-    ])
+    const w = Math.max(15, Math.min(26, 1.6 * t.mmPerM))
+    const h = Math.max(9, w * 0.42)
+    drawNodeBox(pdf, t.x(d.x ?? 0), t.y(d.y ?? 0), w, h, hexToRgb(DEVICE_COLORS[d.category] ?? '#6b7280'),
+      d.name, [[d.manufacturer, d.model].filter(Boolean).join(' ')])
   }
 }
 
@@ -652,34 +766,50 @@ function drawFixtures(pdf: jsPDF, fixtures: PlacedFixture[], project: Project, t
     drawFixtureSymbol(pdf, f.symbol, t.x(f.x), t.y(f.y), rMm, f.rotation, accent)
   }
 
-  // Annotations are drawn after every symbol so nothing overpaints them.
+  // Annotation passes run after every symbol so nothing overpaints a label.
   for (const f of fixtures) {
     const cx = t.x(f.x), cy = t.y(f.y)
+
+    // Channel number in a boxed tag above the symbol, Vectorworks-style.
     if (opts.showChannels && f.channel > 0) {
+      const text = String(f.channel)
       pdf.setFont('helvetica', 'bold'); pdf.setFontSize(5)
-      setText(pdf, INK)
-      pdf.text(String(f.channel), cx, cy - rMm - 1.1, { align: 'center' })
+      const w = Math.max(3.4, pdf.getTextWidth(text) + 2)
+      const y = cy - rMm - 4.4
+      setFill(pdf, PAPER_WHITE)
+      setDraw(pdf, INK, PEN.hair)
+      pdf.rect(cx - w / 2, y, w, 3.4, 'FD')
+      drawText(pdf, text, cx, y + 2.5, { size: 5, bold: true, align: 'center' })
     }
-    let below = cy + rMm + 2
+
+    let below = cy + rMm + 2.2
     if (opts.showAddresses) {
-      pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4)
-      setText(pdf, MUTED)
-      pdf.text(`${f.universe}.${String(f.address).padStart(3, '0')}`, cx, below, { align: 'center' })
-      below += 1.8
+      drawText(pdf, `${f.universe}.${String(f.address).padStart(3, '0')}`, cx, below, {
+        size: 4, color: MUTED, align: 'center', backdrop: true,
+      })
+      below += 2
     }
     if (opts.showFixtureLabels && f.label) {
-      pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4)
-      setText(pdf, [55, 65, 81])
-      pdf.text(f.label, cx, below, { align: 'center' })
+      drawText(pdf, f.label, cx, below, {
+        size: 4, color: [70, 78, 92], align: 'center', backdrop: true,
+      })
     }
   }
 }
 
-// ── Legend column ─────────────────────────────────────────────────────────────
+// ── Key column ────────────────────────────────────────────────────────────────
+
+/** Table heading: tracked caps over a heavy rule. */
+function tableHeading(pdf: jsPDF, text: string, x: number, y: number, w: number): number {
+  drawCaption(pdf, text, x, y, { size: 4.8, color: INK })
+  setDraw(pdf, INK, PEN.frame)
+  pdf.line(x, y + 1.4, x + w, y + 1.4)
+  return y + 5
+}
 
 /**
- * Draws the key column: symbol key, cable key, scale bar. Returns nothing —
- * the column is laid out top-down and clipped to `frame`.
+ * Draws the key column: instrument summary, cable key, north arrow and scale
+ * bar — the block a crew actually reads before touching the drawing.
  */
 export function drawLegend(
   pdf: jsPDF,
@@ -688,89 +818,142 @@ export function drawLegend(
   result: PlotRenderResult,
   paper: PaperSize,
 ) {
-  const heading = (text: string, y: number) => {
-    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(5.5)
-    setText(pdf, [148, 163, 184])
-    pdf.text(text.toUpperCase(), frame.x, y)
-    setDraw(pdf, [226, 232, 240], 0.15)
-    pdf.line(frame.x, y + 1.2, frame.x + frame.w, y + 1.2)
-    return y + 4.5
-  }
-
-  let y = frame.y + 4
-  const bottomReserve = 18 // scale bar
+  const { x, w } = frame
+  const bottomReserve = 30 // north arrow + scale bar
   const limit = frame.y + frame.h - bottomReserve
+  let y = frame.y + 4
 
+  // ── Instrument summary ──────────────────────────────────────────────────
   if (result.legendItems.length > 0) {
-    y = heading('Symbol key', y)
+    y = tableHeading(pdf, 'Instrument summary', x, y, w)
+
+    const qtyX = x + w - 16
+    const wattX = x + w
+    drawCaption(pdf, 'Fixture', x + 10, y, { size: 4 })
+    drawCaption(pdf, 'Qty', qtyX, y, { size: 4, align: 'right' })
+    drawCaption(pdf, 'Watts', wattX, y, { size: 4, align: 'right' })
+    y += 1.6
+    setDraw(pdf, HAIRLINE, PEN.hair)
+    pdf.line(x, y, x + w, y)
+    y += 4.2
+
     let shown = 0
     for (const item of result.legendItems) {
       if (y > limit - 6) break
-      drawFixtureSymbol(pdf, item.symbol, frame.x + 3, y + 0.6, 2.4, 0)
-      pdf.setFont('helvetica', 'normal'); pdf.setFontSize(5.2)
-      setText(pdf, INK)
-      pdf.text(fitText(pdf, item.label, frame.w - 13), frame.x + 7, y + 1)
-      pdf.setFont('helvetica', 'bold')
-      setText(pdf, MUTED)
-      pdf.text(`×${item.count}`, frame.x + frame.w, y + 1, { align: 'right' })
-      y += 6.5
+      drawFixtureSymbol(pdf, item.symbol, x + 3.4, y - 1, 2.1, 0)
+      drawText(pdf, item.label, x + 10, y, { size: 4.8, maxW: w - 28 })
+      drawText(pdf, String(item.count), qtyX, y, { size: 4.8, bold: true, align: 'right' })
+      drawText(pdf, formatWatts(item.watts), wattX, y, { size: 4.4, color: MUTED, align: 'right' })
+      y += 1.4
+      setDraw(pdf, [232, 236, 242], PEN.hair)
+      pdf.line(x, y, x + w, y)
+      y += 4.8
       shown++
     }
+
     const hidden = result.legendItems.length - shown
     if (hidden > 0) {
-      pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4.5)
-      setText(pdf, MUTED)
-      pdf.text(`+ ${hidden} more type${hidden !== 1 ? 's' : ''}`, frame.x, y)
+      drawText(pdf, `+ ${hidden} more type${hidden !== 1 ? 's' : ''}`, x, y, { size: 4.2, color: MUTED })
       y += 4
     }
-    y += 2
+
+    // Totals
+    setDraw(pdf, INK, PEN.frame)
+    pdf.line(x, y - 3.2, x + w, y - 3.2)
+    drawCaption(pdf, 'Total', x, y, { size: 4.4, color: INK })
+    drawText(pdf, String(result.totals.count), qtyX, y, { size: 4.8, bold: true, align: 'right' })
+    drawText(pdf, `${(result.totals.watts / 1000).toFixed(1)} kW`, wattX, y, { size: 4.4, bold: true, align: 'right' })
+    y += 3
+    drawText(pdf, `${result.totals.weight.toFixed(0)} kg total`, wattX, y, { size: 4, color: MUTED, align: 'right' })
+    y += 6
   }
 
-  const cables = cableTypesIn(content)
-  if (cables.length > 0 && y < limit - 10) {
-    y = heading('Cable key', y)
-    for (const type of cables) {
-      if (y > limit - 4) break
-      setDraw(pdf, hexToRgb(CABLE_COLORS[type] ?? '#9ca3af'), 0.5)
-      pdf.setLineDashPattern([1.2, 0.8], 0)
-      pdf.line(frame.x, y, frame.x + 6, y)
+  // ── Cable key ───────────────────────────────────────────────────────────
+  if (result.cableTypes.length > 0 && y < limit - 10) {
+    y = tableHeading(pdf, 'Cable key', x, y, w)
+    for (const type of result.cableTypes) {
+      if (y > limit - 3) break
+      setDraw(pdf, hexToRgb(CABLE_COLORS[type] ?? '#9ca3af'), 0.45)
+      pdf.setLineDashPattern([1.4, 0.9], 0)
+      pdf.line(x, y - 1, x + 7, y - 1)
       pdf.setLineDashPattern([], 0)
-      pdf.setFont('helvetica', 'normal'); pdf.setFontSize(5)
-      setText(pdf, INK)
-      pdf.text(fitText(pdf, CABLE_LABELS[type] ?? type, frame.w - 8), frame.x + 7.5, y + 0.8)
-      y += 4.6
+      drawText(pdf, CABLE_LABELS[type] ?? type, x + 8.5, y, { size: 4.6, maxW: w - 9 })
+      y += 4.4
     }
   }
 
-  drawScaleBar(pdf, frame.x, frame.y + frame.h - 12, frame.w, result, paper)
+  // ── Sheet data ──────────────────────────────────────────────────────────
+  if (y < limit - 24) {
+    y = tableHeading(pdf, 'Sheet data', x, y + 2, w)
+    const universes = [...new Set(content.fixtures.map((f) => f.universe))].sort((a, b) => a - b)
+    const unpatched = content.fixtures.filter((f) => !f.circuitId).length
+    const facts: [string, string][] = [
+      ['Fixtures', String(result.totals.count)],
+      ['Connected load', `${(result.totals.watts / 1000).toFixed(1)} kW`],
+      ['Hanging weight', `${result.totals.weight.toFixed(0)} kg`],
+      ['Universes', universes.length ? universes.map((u) => `U${u}`).join(', ') : '—'],
+      ['Distros', String(content.distros.length)],
+      ['Without a circuit', String(unpatched)],
+    ]
+    for (const [caption, value] of facts) {
+      if (y > limit - 4) break
+      drawCaption(pdf, caption, x, y, { size: 4.2 })
+      drawText(pdf, value, x + w, y, { size: 4.8, bold: true, align: 'right', maxW: w * 0.55 })
+      y += 4.2
+    }
+    y += 1.5
+    drawText(pdf, 'Do not scale from this drawing —', x, y, { size: 3.9, color: MUTED })
+    drawText(pdf, 'verify all dimensions on site.', x, y + 3, { size: 3.9, color: MUTED })
+  }
+
+  // ── North arrow + scale bar ─────────────────────────────────────────────
+  const footY = frame.y + frame.h - 24
+  setDraw(pdf, HAIRLINE, PEN.hair)
+  pdf.line(x, footY - 3, x + w, footY - 3)
+  drawNorthArrow(pdf, x + 4.5, footY + 6)
+  drawScaleBar(pdf, x + 14, footY + 2, w - 14, result, paper)
+}
+
+/** Plan north indicator. */
+export function drawNorthArrow(pdf: jsPDF, cx: number, cy: number, r = 4.2) {
+  setDraw(pdf, INK, PEN.hair)
+  setFill(pdf, PAPER_WHITE)
+  pdf.circle(cx, cy, r, 'FD')
+  setFill(pdf, INK)
+  polyline(pdf, [cx, cy - r * 0.82, cx + r * 0.42, cy + r * 0.5, cx, cy + r * 0.18], 'F', true)
+  setFill(pdf, [255, 255, 255])
+  setDraw(pdf, INK, PEN.hair)
+  polyline(pdf, [cx, cy - r * 0.82, cx - r * 0.42, cy + r * 0.5, cx, cy + r * 0.18], 'FD', true)
+  drawText(pdf, 'N', cx, cy + r + 2.6, { size: 4.4, bold: true, align: 'center', spacing: 0.2 })
 }
 
 /** Graphic scale bar — the thing that keeps a drawing readable after printing. */
 export function drawScaleBar(pdf: jsPDF, x: number, y: number, maxW: number, result: PlotRenderResult, paper: PaperSize) {
   const { mmPerM, denominator, standard } = result.scale
 
-  // Pick a round number of metres that fills most of the available width.
   const candidates = [1, 2, 5, 10, 20, 25, 50, 100, 200]
   let metres = candidates[0]
   for (const c of candidates) if (c * mmPerM <= maxW) metres = c
   const barW = metres * mmPerM
-  const barH = 1.6
+  const barH = 1.5
+  const barY = y + 5
 
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(5.5)
-  setText(pdf, INK)
-  pdf.text(`SCALE  1:${denominator}${standard ? '' : ' (fitted)'}  @ ${PAPER_LABELS[paper]}`, x, y)
+  drawCaption(pdf, `Scale 1:${denominator}${standard ? '' : ' (fitted)'} at ${PAPER_LABELS[paper]}`, x, y + 2, {
+    size: 4.6, color: INK,
+  })
 
-  // Alternating black/white segments, four of them.
   const segs = 4
   const segW = barW / segs
-  const barY = y + 2
   for (let i = 0; i < segs; i++) {
-    setFill(pdf, i % 2 === 0 ? INK : [255, 255, 255])
-    setDraw(pdf, INK, 0.12)
+    setFill(pdf, i % 2 === 0 ? INK : PAPER_WHITE)
+    setDraw(pdf, INK, PEN.hair)
     pdf.rect(x + i * segW, barY, segW, barH, 'FD')
   }
-  pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4.5)
-  setText(pdf, MUTED)
-  pdf.text('0', x, barY + barH + 3)
-  pdf.text(`${metres} m`, x + barW, barY + barH + 3, { align: 'right' })
+  // End ticks
+  setDraw(pdf, INK, PEN.hair)
+  pdf.line(x, barY - 0.8, x, barY + barH + 0.8)
+  pdf.line(x + barW, barY - 0.8, x + barW, barY + barH + 0.8)
+
+  drawText(pdf, '0', x, barY + barH + 3.4, { size: 4, color: MUTED })
+  drawText(pdf, `${metres} m`, x + barW, barY + barH + 3.4, { size: 4, color: MUTED, align: 'right' })
 }

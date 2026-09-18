@@ -3,33 +3,33 @@ import type { Project, CableElement, CableType } from '../types'
 import { CABLE_COLORS, CABLE_LABELS } from '../types'
 import { formatVersion, cableLength } from './utils'
 import {
-  DEFAULT_PLOT_OPTIONS, contentBounds, drawLegend, drawPlot, paperDimensions, selectPlotContent,
+  DEFAULT_PLOT_OPTIONS, PAPER_LABELS, PEN, contentBounds, drawCaption, drawLegend, drawPlot,
+  drawText, paperDimensions, selectPlotContent,
 } from './plotVector'
 import type { PlotOptions } from './plotVector'
 import { formatCircuitRef, computeDistroLoad, computeCircuitLoad, circuitCapacityW } from '../store/projectStore'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const MARGIN = 12            // mm
-const PLOT_TITLE_BLOCK_H = 52 // mm — the architectural block under a drawing
-const REPORT_FOOTER_H = 15   // mm — the compact strip under a report
-const ROW_H = 6              // mm
+const MARGIN = 14          // mm — report page margin
+const REPORT_FOOTER_H = 15 // mm — the strip under a report
+const ROW_H = 5.6          // mm — schedule row height
 
 const BOLD = 'bold' as const
-const NORMAL = 'normal' as const
 
 // Colour palette — architectural drawing look
 const C = {
-  ink:       [15, 23, 42] as RGB,    // near black
-  mid:       [71, 85, 105] as RGB,   // slate-600
-  light:     [148, 163, 184] as RGB, // slate-400
-  faint:     [226, 232, 240] as RGB, // slate-200
+  ink:       [17, 24, 39] as RGB,    // drawing black
+  mid:       [88, 97, 112] as RGB,
+  light:     [150, 158, 172] as RGB,
+  faint:     [226, 231, 238] as RGB,
+  zebra:     [247, 249, 251] as RGB, // schedule row banding
   white:     [255, 255, 255] as RGB,
-  blue:      [37, 99, 235] as RGB,   // blue-600
-  bluePale:  [239, 246, 255] as RGB, // blue-50
-  red:       [220, 38, 38] as RGB,
-  amber:     [217, 119, 6] as RGB,
-  green:     [34, 197, 94] as RGB,
+  blue:      [29, 78, 216] as RGB,   // the single accent
+  bluePale:  [239, 246, 255] as RGB,
+  red:       [190, 30, 45] as RGB,
+  amber:     [180, 100, 10] as RGB,
+  green:     [22, 140, 78] as RGB,
 }
 
 type RGB = [number, number, number]
@@ -70,18 +70,9 @@ function filenameFor(project: Project, kind: string): string {
   return `${slug(project.info.name)}_${kind}_${formatVersion(project.version)}_${formatDate()}.pdf`
 }
 
-/** Shortens text with an ellipsis so it fits `maxW` mm at the current font. */
-function fit(pdf: jsPDF, text: string, maxW: number): string {
-  if (!text) return ''
-  if (maxW <= 0) return ''
-  if (pdf.getTextWidth(text) <= maxW) return text
-  let lo = 0, hi = text.length
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2)
-    if (pdf.getTextWidth(text.slice(0, mid) + '…') <= maxW) lo = mid
-    else hi = mid - 1
-  }
-  return lo > 0 ? text.slice(0, lo) + '…' : ''
+/** "network-switch" → "Network Switch" */
+function titleCase(slugged: string): string {
+  return slugged.split('-').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
 }
 
 function setDocProperties(pdf: jsPDF, project: Project, subject: string) {
@@ -94,151 +85,176 @@ function setDocProperties(pdf: jsPDF, project: Project, subject: string) {
   })
 }
 
-// ── Title block (architectural drawing frame) ─────────────────────────────────
+// ── Sheet frame ───────────────────────────────────────────────────────────────
+// Drawings get the full treatment: a trim border, a zone-reference gutter and
+// an inner frame. It is what makes a sheet readable when it is rolled out on a
+// production desk and someone says "the dimmer in C3".
 
-interface TitleBlockExtras {
-  scaleLabel?: string
-  layerLabel?: string
+const TRIM = 8        // outer trim border, mm from the paper edge
+const ZONE_GUTTER = 5 // where the zone letters and numbers live
+const FRAME = TRIM + ZONE_GUTTER
+
+function drawSheetFrame(pdf: jsPDF, W: number, H: number) {
+  rgb(pdf, C.ink, 'draw')
+
+  // Trim border
+  pdf.setLineWidth(PEN.border)
+  pdf.rect(TRIM, TRIM, W - TRIM * 2, H - TRIM * 2, 'S')
+
+  // Inner frame
+  pdf.setLineWidth(PEN.frame)
+  pdf.rect(FRAME, FRAME, W - FRAME * 2, H - FRAME * 2, 'S')
+
+  const innerW = W - FRAME * 2
+  const innerH = H - FRAME * 2
+  const colCount = Math.max(2, Math.round(innerW / 70))
+  const rowCount = Math.max(2, Math.round(innerH / 70))
+  const colW = innerW / colCount
+  const rowH = innerH / rowCount
+
+  pdf.setLineWidth(PEN.hair)
+  for (let i = 0; i < colCount; i++) {
+    const cx = FRAME + colW * (i + 0.5)
+    const letter = String.fromCharCode(65 + i)
+    drawText(pdf, letter, cx, TRIM + ZONE_GUTTER - 1.4, { size: 5, bold: true, align: 'center', color: C.mid })
+    drawText(pdf, letter, cx, H - TRIM - 1.6, { size: 5, bold: true, align: 'center', color: C.mid })
+    if (i > 0) {
+      const x = FRAME + colW * i
+      pdf.line(x, TRIM, x, FRAME)
+      pdf.line(x, H - FRAME, x, H - TRIM)
+    }
+  }
+  for (let i = 0; i < rowCount; i++) {
+    const cy = FRAME + rowH * (i + 0.5) + 1.6
+    const num = String(i + 1)
+    drawText(pdf, num, TRIM + ZONE_GUTTER / 2, cy, { size: 5, bold: true, align: 'center', color: C.mid })
+    drawText(pdf, num, W - TRIM - ZONE_GUTTER / 2, cy, { size: 5, bold: true, align: 'center', color: C.mid })
+    if (i > 0) {
+      const y = FRAME + rowH * i
+      pdf.line(TRIM, y, FRAME, y)
+      pdf.line(W - FRAME, y, W - TRIM, y)
+    }
+  }
 }
 
-function drawTitleBlock(
-  pdf: jsPDF, project: Project, W: number, H: number, subtitle: string,
-  page: number, pageCount: number, extras: TitleBlockExtras = {},
+// ── Title block ───────────────────────────────────────────────────────────────
+
+const TITLE_BLOCK_H = 38 // mm, measured from the inner frame
+
+interface TitleBlockData {
+  subtitle: string
+  scaleLabel: string
+  paperLabel: string
+  sheetRef: string
+  layerLabel?: string
+  page: number
+  pageCount: number
+}
+
+/** One captioned cell of the title block. */
+function cell(
+  pdf: jsPDF, x: number, y: number, w: number, caption: string, value: string,
+  opts: { size?: number; color?: RGB; bold?: boolean } = {},
 ) {
-  const tbY = H - PLOT_TITLE_BLOCK_H
-  const m = MARGIN
+  drawCaption(pdf, caption, x + 2, y + 3.2, { size: 4.3 })
+  drawText(pdf, value || '—', x + 2, y + 3.2 + (opts.size ?? 8) * 0.48 + 1.4, {
+    size: opts.size ?? 8,
+    bold: opts.bold ?? true,
+    color: opts.color ?? C.ink,
+    maxW: w - 4,
+  })
+}
 
-  // Outer page border
+function drawTitleBlock(pdf: jsPDF, project: Project, W: number, H: number, d: TitleBlockData) {
+  const left = FRAME
+  const right = W - FRAME
+  const top = H - FRAME - TITLE_BLOCK_H
+  const bottom = H - FRAME
+  const width = right - left
+
+  // Block outline, heavier than the cell rules inside it
   rgb(pdf, C.ink, 'draw')
-  pdf.setLineWidth(0.6)
-  pdf.rect(m, m, W - m * 2, H - m * 2, 'S')
+  pdf.setLineWidth(PEN.frame)
+  pdf.line(left, top, right, top)
 
-  // Title block top rule
-  line(pdf, m, tbY, W - m, tbY, 0.4)
+  const c1 = left + width * 0.42
+  const c2 = c1 + width * 0.30
+  pdf.line(c1, top, c1, bottom)
+  pdf.line(c2, top, c2, bottom)
 
-  const col1W = (W - m * 2) * 0.38
-  const col2W = (W - m * 2) * 0.28
-  const col3X = m + col1W + col2W
+  // ── Column 1: what this drawing is ─────────────────────────────────────────
+  let y = top
+  const c1w = c1 - left
 
-  line(pdf, m + col1W, tbY, m + col1W, H - m, 0.3)
-  line(pdf, col3X, tbY, col3X, H - m, 0.3)
-
-  // ── Left: company, client, project, venue ──────────────────────────────────
-  let ty = tbY + 6
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(10)
-  rgb(pdf, C.ink, 'text')
-  pdf.text(fit(pdf, project.info.companyName || 'Prae Plot', col1W - 6), m + 3, ty)
-
-  if (project.info.clientName) {
-    ty += 4.5
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-    rgb(pdf, C.light, 'text')
-    pdf.text('CLIENT', m + 3, ty)
-    ty += 3.2
-    rgb(pdf, C.mid, 'text'); pdf.setFontSize(8)
-    pdf.text(fit(pdf, project.info.clientName, col1W - 6), m + 3, ty)
-  }
-
-  ty += 4
-  line(pdf, m, ty, m + col1W, ty, 0.15)
-  ty += 4.5
-
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(11)
-  rgb(pdf, C.ink, 'text')
-  pdf.text(fit(pdf, project.info.name, col1W - 6), m + 3, ty)
-  ty += 4.5
-
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8.5)
-  rgb(pdf, C.blue, 'text')
-  pdf.text(fit(pdf, subtitle, col1W - 6), m + 3, ty)
-  ty += 4
-
-  line(pdf, m, ty, m + col1W, ty, 0.15)
-  ty += 4
-
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-  rgb(pdf, C.light, 'text'); pdf.text('VENUE', m + 3, ty)
-  ty += 3.2
-  rgb(pdf, C.mid, 'text'); pdf.setFontSize(8)
-  const venue = `${project.info.venue}${project.info.venueAddress ? ' — ' + project.info.venueAddress : ''}`
-  pdf.text(fit(pdf, venue || '—', col1W - 6), m + 3, ty)
-
-  // ── Middle: responsibilities ───────────────────────────────────────────────
-  const mx = m + col1W + 3
-  const fields: [string, string][] = [
-    ['LIGHTING DESIGNER', project.info.lightingDesigner],
-    ['TECHNICAL DIRECTOR', project.info.technicalDirector],
-    ['DRAWING AUTHOR', project.info.drawingAuthor],
-    ['PROJECT DATE', project.info.projectDate],
-  ]
-  let my = tbY + 6
-  for (const [label, value] of fields) {
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
-    rgb(pdf, C.light, 'text')
-    pdf.text(label, mx, my)
-    my += 3
-    pdf.setFont('helvetica', BOLD); pdf.setFontSize(8)
-    rgb(pdf, C.ink, 'text')
-    pdf.text(fit(pdf, value || '—', col2W - 6), mx, my)
-    my += 4.5
-    line(pdf, m + col1W, my - 1.2, col3X, my - 1.2, 0.1)
-  }
-
-  // ── Right: version, scale, generated stamp, logo ───────────────────────────
-  const rx = col3X + 3
-  const rightW = W - m - col3X - 6
-  let ry = tbY + 6
-
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
-  rgb(pdf, C.light, 'text')
-  pdf.text('VERSION', rx, ry)
-  pdf.text('SCALE', rx + rightW * 0.45, ry)
-  ry += 4.5
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(13)
-  rgb(pdf, C.ink, 'text')
-  pdf.text(formatVersion(project.version), rx, ry)
-  pdf.setFontSize(extras.scaleLabel && extras.scaleLabel.length > 8 ? 9 : 11)
-  pdf.text(extras.scaleLabel ?? 'NTS', rx + rightW * 0.45, ry)
-  ry += 3
-
-  line(pdf, col3X, ry, W - m, ry, 0.15)
-  ry += 4.5
-
-  if (extras.layerLabel) {
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
-    rgb(pdf, C.light, 'text')
-    pdf.text('LAYERS', rx, ry)
-    ry += 3.2
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7.5)
-    rgb(pdf, C.mid, 'text')
-    pdf.text(fit(pdf, extras.layerLabel, rightW), rx, ry)
-    ry += 4.5
-  }
-
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
-  rgb(pdf, C.light, 'text')
-  pdf.text('GENERATED', rx, ry)
-  ry += 3.2
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
-  rgb(pdf, C.mid, 'text')
-  pdf.text(fit(pdf, new Date().toLocaleString(), rightW), rx, ry)
-
+  // Company mark sits top-right of the identity column
   if (project.info.companyLogo) {
     try {
-      const logoW = 24, logoH = 10
-      pdf.addImage(project.info.companyLogo, W - m - logoW - 3, H - m - logoH - 5, logoW, logoH, undefined, 'FAST')
+      pdf.addImage(project.info.companyLogo, c1 - 27, top + 2, 25, 9, undefined, 'FAST')
     } catch { /* unusable logo data — the block still prints */ }
   }
+  cell(pdf, left, y, project.info.companyLogo ? c1w - 29 : c1w, 'Project', project.info.name, { size: 11 })
+  y += 12
+  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(left, y, c1, y)
 
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
-  rgb(pdf, C.light, 'text')
-  const stamp = pageCount > 1 ? `Page ${page} of ${pageCount}  ·  Generated by Prae Plot` : 'Generated by Prae Plot'
-  pdf.text(stamp, W - m - 3, H - m - 2, { align: 'right' })
+  cell(pdf, left, y, c1w, 'Drawing', d.subtitle, { size: 8.5, color: C.blue })
+  y += 9.5
+  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(left, y, c1, y)
+
+  const venue = [project.info.venue, project.info.venueAddress].filter(Boolean).join(' — ')
+  cell(pdf, left, y, c1w * 0.62, 'Venue', venue, { size: 7.5 })
+  cell(pdf, left + c1w * 0.62, y, c1w * 0.38, 'Client', project.info.clientName ?? project.info.companyName, { size: 7.5 })
+
+  // ── Column 2: who is responsible ───────────────────────────────────────────
+  const c2w = c2 - c1
+  const half = c2w / 2
+  const fields: [string, string][] = [
+    ['Lighting designer', project.info.lightingDesigner],
+    ['Technical director', project.info.technicalDirector],
+    ['Drawn by', project.info.drawingAuthor],
+    ['Project date', project.info.projectDate],
+  ]
+  const rowH = TITLE_BLOCK_H / 2
+  fields.forEach(([caption, value], i) => {
+    const cx = c1 + (i % 2) * half
+    const cy = top + Math.floor(i / 2) * rowH
+    cell(pdf, cx, cy, half, caption, value, { size: 8 })
+  })
+  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair)
+  pdf.line(c1, top + rowH, c2, top + rowH)
+  pdf.line(c1 + half, top, c1 + half, bottom)
+
+  // ── Column 3: sheet data ───────────────────────────────────────────────────
+  const c3w = right - c2
+  const c3half = c3w / 2
+  const r3 = TITLE_BLOCK_H / 3
+  const sheetFields: [string, string, number][] = [
+    ['Scale', d.scaleLabel, 10],
+    ['Paper', d.paperLabel, 10],
+    ['Drawing no.', d.sheetRef, 9],
+    ['Revision', formatVersion(project.version), 9],
+    ['Sheet', d.pageCount > 1 ? `${d.page} of ${d.pageCount}` : '1 of 1', 8],
+    ['Layers', d.layerLabel ?? 'All', 7],
+  ]
+  sheetFields.forEach(([caption, value, size], i) => {
+    const cx = c2 + (i % 2) * c3half
+    const cy = top + Math.floor(i / 2) * r3
+    cell(pdf, cx, cy, c3half, caption, value, { size })
+  })
+  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair)
+  pdf.line(c2, top + r3, right, top + r3)
+  pdf.line(c2, top + r3 * 2, right, top + r3 * 2)
+  pdf.line(c2 + c3half, top, c2 + c3half, bottom)
+
+  // Issue stamp along the bottom of the identity column
+  drawText(pdf, `Issued ${new Date().toLocaleString()} · Prae Plot`, left + 2, bottom - 1.6, {
+    size: 4.2, color: C.light,
+  })
 }
 
 // ── Report scaffolding ────────────────────────────────────────────────────────
-// Reports get a compact footer instead of the full architectural title block —
-// there is no drawing to frame, and an A4 sheet needs the room for rows.
+// Paperwork is set like a technical schedule: tracked caps for headings, rules
+// instead of filled bars, numerics right-aligned, and the same header and
+// footer on every sheet.
 
 interface Report {
   pdf: jsPDF
@@ -246,39 +262,58 @@ interface Report {
   H: number
   y: number
   title: string
+  sheetRef: string
   project: Project
   /** Redrawn at the top of every continuation page. */
   repeatHeader?: () => void
 }
 
-function startReport(project: Project, title: string): Report {
+function startReport(project: Project, title: string, sheetRef: string): Report {
   const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
   const W = pdf.internal.pageSize.getWidth()
   const H = pdf.internal.pageSize.getHeight()
   setDocProperties(pdf, project, title)
 
-  const r: Report = { pdf, W, H, y: 0, title, project }
+  const r: Report = { pdf, W, H, y: 0, title, sheetRef, project }
   r.y = reportHeader(r)
   return r
 }
 
 function reportHeader(r: Report): number {
   const { pdf, W, project, title } = r
-  const top = MARGIN + 4
+  const x = MARGIN
+  const w = W - MARGIN * 2
+  let y = MARGIN + 6
 
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(14)
-  rgb(pdf, C.ink, 'text')
-  pdf.text(title.toUpperCase(), MARGIN, top + 8)
+  drawText(pdf, title.toUpperCase(), x, y, { size: 13, bold: true, spacing: 0.5, color: C.ink })
+  drawText(pdf, 'PRAE PLOT', W - MARGIN, y, { size: 5, spacing: 0.9, color: C.light, align: 'right' })
+  y += 2.4
 
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-  rgb(pdf, C.mid, 'text')
-  const meta = [project.info.name, project.info.venue, formatVersion(project.version)].filter(Boolean).join('  ·  ')
-  pdf.text(fit(pdf, meta, W - MARGIN * 2), MARGIN, top + 14)
+  rgb(pdf, C.ink, 'draw')
+  pdf.setLineWidth(PEN.frame)
+  pdf.line(x, y, x + w, y)
+  y += 4.5
 
-  rgb(pdf, C.blue, 'draw')
-  pdf.setLineWidth(0.8)
-  pdf.line(MARGIN, top + 17, W - MARGIN, top + 17)
-  return top + 22
+  // Meta strip: four captioned facts across the page
+  const meta: [string, string][] = [
+    ['Project', project.info.name],
+    ['Venue', project.info.venue],
+    ['Version', formatVersion(project.version)],
+    ['Date', project.info.projectDate || formatDate()],
+  ]
+  const colW = [w * 0.38, w * 0.3, w * 0.14, w * 0.18]
+  let cx = x
+  meta.forEach(([caption, value], i) => {
+    drawCaption(pdf, caption, cx, y, { size: 4.2 })
+    drawText(pdf, value || '—', cx, y + 4.2, { size: 8, bold: true, maxW: colW[i] - 3 })
+    cx += colW[i]
+  })
+  y += 6.5
+
+  rgb(pdf, C.faint, 'draw')
+  pdf.setLineWidth(PEN.hair)
+  pdf.line(x, y, x + w, y)
+  return y + 6
 }
 
 /** Bottom of the usable area on a report page. */
@@ -300,20 +335,22 @@ function drawReportFooter(r: Report, page: number, pageCount: number) {
   const y = H - REPORT_FOOTER_H - MARGIN + 4
 
   rgb(pdf, C.faint, 'draw')
-  line(pdf, MARGIN, y, W - MARGIN, y, 0.3)
+  pdf.setLineWidth(PEN.hair)
+  pdf.line(MARGIN, y, W - MARGIN, y)
 
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-  rgb(pdf, C.light, 'text')
   const left = [
     project.info.companyName,
     project.info.drawingAuthor && `Drawn by ${project.info.drawingAuthor}`,
-    project.info.projectDate,
-  ].filter(Boolean).join('  ·  ')
-  pdf.text(fit(pdf, left || 'Prae Plot', W * 0.6), MARGIN, y + 4.5)
+    project.info.venue,
+  ].filter(Boolean).join('   ·   ')
+  drawText(pdf, left || 'Prae Plot', MARGIN, y + 4.4, { size: 5.5, color: C.light, maxW: W * 0.55 })
 
-  const right = pageCount > 1 ? `Page ${page} of ${pageCount}  ·  Prae Plot` : 'Generated by Prae Plot'
-  pdf.text(right, W - MARGIN, y + 4.5, { align: 'right' })
-  pdf.text(new Date().toLocaleString(), W - MARGIN, y + 8, { align: 'right' })
+  drawText(pdf, `${r.sheetRef}   ·   SHEET ${page} OF ${pageCount}`, W - MARGIN, y + 4.4, {
+    size: 5.5, spacing: 0.3, color: C.mid, align: 'right', bold: true,
+  })
+  drawText(pdf, `Generated ${new Date().toLocaleString()}`, W - MARGIN, y + 8.2, {
+    size: 5, color: C.light, align: 'right',
+  })
 }
 
 function finishReport(r: Report, kind: string): BuiltPdf {
@@ -326,10 +363,26 @@ function finishReport(r: Report, kind: string): BuiltPdf {
 }
 
 function emptyNote(r: Report, text: string) {
-  rgb(r.pdf, C.light, 'text')
-  r.pdf.setFont('helvetica', NORMAL); r.pdf.setFontSize(9)
-  r.pdf.text(text, r.W / 2, r.y + 12, { align: 'center' })
+  drawText(r.pdf, text, r.W / 2, r.y + 12, { size: 8.5, color: C.light, align: 'center' })
   r.y += 20
+}
+
+/** Section rule: tracked caps with an optional colour chip, over a rule. */
+function sectionHeading(r: Report, text: string, right?: string, chip?: string) {
+  const { pdf, W } = r
+  const x = MARGIN
+  const w = W - MARGIN * 2
+  if (chip) {
+    pdf.setFillColor(chip)
+    pdf.rect(x, r.y - 2.6, 2.2, 3.4, 'F')
+  }
+  drawText(pdf, text.toUpperCase(), x + (chip ? 4.5 : 0), r.y, { size: 7.5, bold: true, spacing: 0.35 })
+  if (right) drawText(pdf, right, x + w, r.y, { size: 6.5, color: C.mid, align: 'right' })
+  r.y += 1.8
+  rgb(pdf, C.mid, 'draw')
+  pdf.setLineWidth(PEN.archLight)
+  pdf.line(x, r.y, x + w, r.y)
+  r.y += 4.5
 }
 
 // ── Table utilities ───────────────────────────────────────────────────────────
@@ -343,34 +396,46 @@ function fillColumn(cols: Col[], flexIndex: number, totalW: number) {
 }
 
 function tableHeader(pdf: jsPDF, x: number, y: number, cols: Col[], totalW: number) {
-  rgb(pdf, C.ink, 'fill')
-  pdf.rect(x, y, totalW, 5.5, 'F')
-  rgb(pdf, C.white, 'text')
-  pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
+  rgb(pdf, C.ink, 'draw')
+  pdf.setLineWidth(PEN.archLight)
+  pdf.line(x, y, x + totalW, y)
+
   let cx = x
   for (const col of cols) {
-    if (col.align === 'right') pdf.text(col.label, cx + col.w - 1.5, y + 3.8, { align: 'right' })
-    else pdf.text(col.label, cx + 1.5, y + 3.8)
+    const right = col.align === 'right'
+    drawCaption(pdf, col.label, right ? cx + col.w - 1.5 : cx + 1.5, y + 3.6, {
+      size: 4.6, color: C.mid, align: right ? 'right' : 'left',
+    })
     cx += col.w
   }
-  return y + 5.5
+  y += 5
+  rgb(pdf, C.mid, 'draw')
+  pdf.setLineWidth(PEN.hair)
+  pdf.line(x, y, x + totalW, y)
+  return y + 0.6
 }
 
 function tableRow(pdf: jsPDF, x: number, y: number, cells: string[], cols: Col[], even: boolean, totalW: number) {
   if (even) {
-    rgb(pdf, C.faint, 'fill')
-    pdf.rect(x, y, totalW, ROW_H - 0.5, 'F')
+    rgb(pdf, C.zebra, 'fill')
+    pdf.rect(x, y, totalW, ROW_H, 'F')
   }
-  rgb(pdf, C.ink, 'text')
-  pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
   let cx = x
   for (let i = 0; i < cells.length && i < cols.length; i++) {
-    const text = fit(pdf, cells[i] ?? '', cols[i].w - 3)
-    if (cols[i].align === 'right') pdf.text(text, cx + cols[i].w - 1.5, y + 4, { align: 'right' })
-    else pdf.text(text, cx + 1.5, y + 4)
+    const right = cols[i].align === 'right'
+    drawText(pdf, cells[i] ?? '', right ? cx + cols[i].w - 1.5 : cx + 1.5, y + 3.8, {
+      size: 6.8, align: right ? 'right' : 'left', maxW: cols[i].w - 3,
+    })
     cx += cols[i].w
   }
-  return y + ROW_H - 0.5
+  return y + ROW_H
+}
+
+/** Closes a schedule with the double rule a totals line is set under. */
+function tableRule(pdf: jsPDF, x: number, y: number, totalW: number, heavy = false) {
+  rgb(pdf, heavy ? C.ink : C.faint, 'draw')
+  pdf.setLineWidth(heavy ? PEN.archLight : PEN.hair)
+  pdf.line(x, y, x + totalW, y)
 }
 
 // ── Plot PDF ──────────────────────────────────────────────────────────────────
@@ -416,40 +481,48 @@ export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): Bui
   pages.forEach((page, i) => {
     if (i > 0) pdf.addPage([W, H], opts.orientation)
 
-    const legendW = opts.showLegend ? Math.min(58, Math.max(40, W * 0.15)) : 0
+    drawSheetFrame(pdf, W, H)
+
+    const legendW = opts.showLegend ? Math.min(62, Math.max(44, W * 0.16)) : 0
     const area = {
-      x: MARGIN + 3,
-      y: MARGIN + 3,
-      w: W - MARGIN * 2 - 6,
-      h: H - PLOT_TITLE_BLOCK_H - MARGIN - 6,
+      x: FRAME + 4,
+      y: FRAME + 4,
+      w: W - FRAME * 2 - 8,
+      h: H - FRAME - TITLE_BLOCK_H - FRAME - 8,
     }
-    const drawing = { ...area, w: area.w - (legendW ? legendW + 5 : 0) }
+    const drawing = { ...area, w: area.w - (legendW ? legendW + 6 : 0) }
 
     const content = selectPlotContent(project, page.layerIds, opts.showBackground)
     const result = drawPlot(pdf, project, content, drawing, opts, req.gridSize ?? 1, sharedBounds)
 
     if (legendW) {
-      // Separator between drawing and key column
+      // Rule between the drawing and the key column
       rgb(pdf, C.faint, 'draw')
-      line(pdf, area.x + drawing.w + 2.5, area.y, area.x + drawing.w + 2.5, area.y + area.h, 0.2)
-      drawLegend(pdf, { x: area.x + drawing.w + 5, y: area.y, w: legendW, h: area.h }, content, result, opts.paper)
+      line(pdf, area.x + drawing.w + 3, area.y, area.x + drawing.w + 3, area.y + area.h, PEN.hair)
+      drawLegend(pdf, { x: area.x + drawing.w + 6, y: area.y, w: legendW, h: area.h }, content, result, opts.paper)
     }
 
     if (result.scale.overflow) {
-      rgb(pdf, C.amber, 'fill')
-      pdf.roundedRect(drawing.x, drawing.y, 62, 6, 1, 1, 'F')
-      rgb(pdf, C.white, 'text')
-      pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
-      pdf.text('Drawing is clipped at this scale', drawing.x + 2, drawing.y + 4)
+      rgb(pdf, C.amber, 'draw')
+      rgb(pdf, C.white, 'fill')
+      pdf.setLineWidth(PEN.archLight)
+      pdf.rect(drawing.x, drawing.y, 64, 6, 'FD')
+      drawText(pdf, 'DRAWING CLIPPED AT THIS SCALE', drawing.x + 2.5, drawing.y + 4, {
+        size: 5.5, bold: true, spacing: 0.25, color: C.amber,
+      })
     }
 
     const layerLabel = page.label
       ?? (page.layerIds ? page.layerIds.map(layerName).join(', ') : 'All layers')
-    const subtitle = page.label ? `Lighting Plot — ${page.label}` : 'Lighting Plot'
 
-    drawTitleBlock(pdf, project, W, H, subtitle, i + 1, pages.length, {
+    drawTitleBlock(pdf, project, W, H, {
+      subtitle: page.label ? `Lighting Plot — ${page.label}` : 'Lighting Plot',
       scaleLabel: `1:${result.scale.denominator}${result.scale.standard ? '' : '*'}`,
+      paperLabel: `${PAPER_LABELS[opts.paper]} ${opts.orientation === 'landscape' ? 'L' : 'P'}`,
+      sheetRef: `LX-${String(i + 1).padStart(2, '0')}`,
       layerLabel,
+      page: i + 1,
+      pageCount: pages.length,
     })
   })
 
@@ -460,7 +533,7 @@ export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): Bui
 // ── Patch PDF ─────────────────────────────────────────────────────────────────
 
 export function buildPatchPDF(project: Project): BuiltPdf {
-  const r = startReport(project, 'Patch Sheet')
+  const r = startReport(project, 'Patch Sheet', 'PATCH')
   const { pdf, W } = r
   const totalW = W - MARGIN * 2
 
@@ -499,15 +572,18 @@ export function buildPatchPDF(project: Project): BuiltPdf {
     ], cols, idx % 2 === 0, totalW)
   })
 
-  ensureSpace(r, 8)
-  r.y += 2
-  rgb(pdf, C.faint, 'fill')
-  pdf.rect(MARGIN, r.y, totalW, 6, 'F')
-  rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
+  ensureSpace(r, 10)
+  tableRule(pdf, MARGIN, r.y, totalW, true)
+  r.y += 4.2
   const kw = fixtures.reduce((s, f) => s + f.powerRating, 0) / 1000
   const kg = fixtures.reduce((s, f) => s + f.weight, 0)
-  pdf.text(`${fixtures.length} fixture${fixtures.length !== 1 ? 's' : ''} · ${kw.toFixed(1)} kW · ${kg.toFixed(1)} kg`, MARGIN + 2, r.y + 4)
-  r.y += 8
+  drawCaption(pdf, 'Total', MARGIN + 1.5, r.y, { size: 4.6, color: C.ink })
+  drawText(pdf, `${fixtures.length} fixtures    ${kw.toFixed(1)} kW    ${kg.toFixed(1)} kg`, MARGIN + totalW - 1.5, r.y, {
+    size: 7, bold: true, align: 'right',
+  })
+  r.y += 1.6
+  tableRule(pdf, MARGIN, r.y, totalW, true)
+  r.y += 6
 
   return finishReport(r, 'Patch')
 }
@@ -515,7 +591,7 @@ export function buildPatchPDF(project: Project): BuiltPdf {
 // ── Equipment PDF ─────────────────────────────────────────────────────────────
 
 export function buildEquipmentPDF(project: Project): BuiltPdf {
-  const r = startReport(project, 'Equipment List')
+  const r = startReport(project, 'Equipment List', 'EQUIP')
   const { pdf, W } = r
   const totalW = W - MARGIN * 2
 
@@ -553,28 +629,26 @@ export function buildEquipmentPDF(project: Project): BuiltPdf {
       ], cols, idx % 2 === 0, totalW)
     })
 
-    ensureSpace(r, 8)
-    r.y += 1
-    rgb(pdf, C.ink, 'fill')
-    pdf.rect(MARGIN, r.y, totalW, 6, 'F')
-    rgb(pdf, C.white, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
+    ensureSpace(r, 10)
+    tableRule(pdf, MARGIN, r.y, totalW, true)
+    r.y += 4.2
     const tw = project.fixtures.reduce((s, f) => s + f.weight, 0)
     const tp = project.fixtures.reduce((s, f) => s + f.powerRating, 0)
-    pdf.text('TOTAL', MARGIN + 2, r.y + 4)
     const wCol = MARGIN + cols[0].w + cols[1].w
-    pdf.text(`${tw.toFixed(1)} kg`, wCol + cols[2].w - 1.5, r.y + 4, { align: 'right' })
-    pdf.text(`${tp.toFixed(0)} W`, wCol + cols[2].w + cols[3].w - 1.5, r.y + 4, { align: 'right' })
-    r.y += 8
+    drawText(pdf, String(project.fixtures.length), MARGIN + cols[0].w - 1.5, r.y, { size: 7, bold: true, align: 'right' })
+    drawCaption(pdf, 'Total', MARGIN + cols[0].w + 1.5, r.y, { size: 4.6, color: C.ink })
+    drawText(pdf, `${tw.toFixed(1)} kg`, wCol + cols[2].w - 1.5, r.y, { size: 7, bold: true, align: 'right' })
+    drawText(pdf, `${tp.toFixed(0)} W`, wCol + cols[2].w + cols[3].w - 1.5, r.y, { size: 7, bold: true, align: 'right' })
+    r.y += 1.6
+    tableRule(pdf, MARGIN, r.y, totalW, true)
+    r.y += 6
   }
 
   // Devices belong on the equipment list too — they are things that get packed.
   if (project.devices.length > 0) {
-    ensureSpace(r, 20)
+    ensureSpace(r, 24)
     r.y += 4
-    pdf.setFont('helvetica', BOLD); pdf.setFontSize(8)
-    rgb(pdf, C.mid, 'text')
-    pdf.text('DEVICES', MARGIN, r.y)
-    r.y += 2
+    sectionHeading(r, 'Devices', `${project.devices.length} item${project.devices.length !== 1 ? 's' : ''}`)
     const dCols: Col[] = [
       { label: 'QTY', w: 14, align: 'right' },
       { label: 'DEVICE', w: 0 },
@@ -589,7 +663,7 @@ export function buildEquipmentPDF(project: Project): BuiltPdf {
       r.y = tableRow(pdf, MARGIN, r.y, [
         '1',
         [d.manufacturer, d.model, d.name].filter(Boolean).join(' ') || d.name,
-        d.category,
+        titleCase(d.category),
         d.powerRating ? `${d.powerRating} W` : '—',
       ], dCols, idx % 2 === 0, totalW)
     })
@@ -652,7 +726,7 @@ function resolveName(id: string | undefined, project: Project): string {
 const CABLE_OVERHEAD = 0.20 // 20% slack on drawn lengths
 
 export function buildCablePDF(project: Project): BuiltPdf {
-  const r = startReport(project, 'Cable Schedule')
+  const r = startReport(project, 'Cable Schedule', 'CABLE')
   const { pdf, W } = r
   const totalW = W - MARGIN * 2
 
@@ -681,20 +755,15 @@ export function buildCablePDF(project: Project): BuiltPdf {
 
   let runIdx = 1
   for (const [type, runs] of byType) {
-    ensureSpace(r, 30)
-
-    const hex = CABLE_COLORS[type] ?? '#9ca3af'
-    pdf.setFillColor(hex)
-    pdf.rect(MARGIN, r.y, 3, 5.5, 'F')
-    rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN + 3, r.y, totalW - 3, 5.5, 'F')
-    rgb(pdf, C.ink, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(7.5)
-    pdf.text(CABLE_LABELS[type] ?? type, MARGIN + 6, r.y + 3.8)
+    if (!ensureSpace(r, 32)) r.y += 3
 
     const typeTotal = runs.reduce((s, c) => s + cableLength(c) * (1 + CABLE_OVERHEAD), 0)
-    rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
-    pdf.text(`${runs.length} run${runs.length !== 1 ? 's' : ''}  ·  ${typeTotal.toFixed(1)} m total`, W - MARGIN - 2, r.y + 3.8, { align: 'right' })
-    r.y += 5.5
+    sectionHeading(
+      r,
+      CABLE_LABELS[type] ?? type,
+      `${runs.length} run${runs.length !== 1 ? 's' : ''}   ·   ${typeTotal.toFixed(1)} m total`,
+      CABLE_COLORS[type] ?? '#9ca3af',
+    )
 
     r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, runCols, totalW) }
     r.y = tableHeader(pdf, MARGIN, r.y, runCols, totalW)
@@ -721,24 +790,26 @@ export function buildCablePDF(project: Project): BuiltPdf {
 
     // Stock lengths to pull from the store
     const lengths = available.filter((l) => breakdown[l])
-    ensureSpace(r, 20)
-    r.y += 3
-    rgb(pdf, C.light, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
-    pdf.text('CABLES TO PULL (per run, incl. 20% slack)', MARGIN, r.y + 3)
-    r.y += 5
+    ensureSpace(r, 22)
+    tableRule(pdf, MARGIN, r.y, totalW)
+    r.y += 4
+    drawCaption(pdf, 'Cables to pull — per run, incl. 20% slack', MARGIN, r.y, { size: 4.4 })
+    r.y += 3.5
 
     lengths.forEach((len, i) => {
       const qty = breakdown[len]
-      const bx = MARGIN + (i % 6) * 30
-      const by = r.y + Math.floor(i / 6) * 11
-      rgb(pdf, C.bluePale, 'fill')
-      pdf.roundedRect(bx, by, 27, 9, 1, 1, 'F')
-      rgb(pdf, C.blue, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(9)
-      pdf.text(`${qty}×`, bx + 2, by + 6)
-      rgb(pdf, C.ink, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(8)
-      pdf.text(`${len} m`, bx + 11, by + 6)
+      const bx = MARGIN + (i % 7) * 25
+      const by = r.y + Math.floor(i / 7) * 11
+      rgb(pdf, C.white, 'fill')
+      rgb(pdf, C.faint, 'draw')
+      pdf.setLineWidth(PEN.hair)
+      pdf.rect(bx, by, 22, 9, 'FD')
+      pdf.setFont('helvetica', BOLD); pdf.setFontSize(9.5)
+      const qtyW = pdf.getTextWidth(String(qty))
+      drawText(pdf, String(qty), bx + 2.5, by + 6.2, { size: 9.5, bold: true, color: C.blue })
+      drawText(pdf, `× ${len} m`, bx + 3.6 + qtyW, by + 6.2, { size: 7 })
     })
-    r.y += Math.ceil(Math.max(1, lengths.length) / 6) * 11 + 4
+    r.y += Math.ceil(Math.max(1, lengths.length) / 7) * 11 + 6
   }
 
   return finishReport(r, 'Cables')
@@ -749,7 +820,7 @@ export function buildCablePDF(project: Project): BuiltPdf {
 const NOMINAL_VOLTAGE = 230
 
 export function buildPowerPDF(project: Project): BuiltPdf {
-  const r = startReport(project, 'Power Report')
+  const r = startReport(project, 'Power Report', 'POWER')
   const { pdf, W } = r
   const totalW = W - MARGIN * 2
   const kw = (w: number) => `${(w / 1000).toFixed(2)} kW`
@@ -767,21 +838,22 @@ export function buildPowerPDF(project: Project): BuiltPdf {
     { label: 'ASSIGNED LOAD', value: kw(totalAssigned), sub: totalCapacity > 0 ? `${Math.round(totalAssigned / totalCapacity * 100)}% of capacity` : '—' },
     { label: 'UNASSIGNED', value: String(unassigned), sub: unassigned > 0 ? 'fixtures need a circuit' : 'all assigned' },
   ]
+  rgb(pdf, C.ink, 'draw'); pdf.setLineWidth(PEN.archLight)
+  pdf.line(MARGIN, r.y, MARGIN + totalW, r.y)
   kpis.forEach((k, i) => {
     const bx = MARGIN + i * (kpiBoxW + 2)
-    rgb(pdf, C.faint, 'fill')
-    pdf.roundedRect(bx, r.y, kpiBoxW, 17, 1, 1, 'F')
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(5.5)
-    rgb(pdf, C.light, 'text')
-    pdf.text(k.label, bx + 2.5, r.y + 4.5)
-    pdf.setFont('helvetica', BOLD); pdf.setFontSize(9.5)
-    rgb(pdf, C.ink, 'text')
-    pdf.text(fit(pdf, k.value, kpiBoxW - 5), bx + 2.5, r.y + 10.5)
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6)
-    rgb(pdf, C.mid, 'text')
-    pdf.text(fit(pdf, k.sub, kpiBoxW - 5), bx + 2.5, r.y + 14.5)
+    drawCaption(pdf, k.label, bx, r.y + 4.5, { size: 4.4 })
+    drawText(pdf, k.value, bx, r.y + 11, { size: 11, bold: true, maxW: kpiBoxW - 3 })
+    drawText(pdf, k.sub, bx, r.y + 15, { size: 5.5, color: C.mid, maxW: kpiBoxW - 3 })
+    if (i > 0) {
+      rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair)
+      pdf.line(bx - 3, r.y + 1.5, bx - 3, r.y + 16)
+    }
   })
-  r.y += 22
+  r.y += 17.5
+  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair)
+  pdf.line(MARGIN, r.y, MARGIN + totalW, r.y)
+  r.y += 7
 
   if (distros.length === 0) {
     emptyNote(r, 'No power distribution added.')
@@ -797,30 +869,28 @@ export function buildPowerPDF(project: Project): BuiltPdf {
     const capacity = distro.incomingRating * distro.phases * NOMINAL_VOLTAGE
     const pct = capacity > 0 ? Math.round(totalLoad / capacity * 100) : 0
 
-    rgb(pdf, C.ink, 'fill')
-    pdf.rect(MARGIN, r.y, totalW, 11, 'F')
-    rgb(pdf, C.white, 'text')
-    pdf.setFont('helvetica', BOLD); pdf.setFontSize(9)
-    pdf.text(distro.ref ? `[${distro.ref}]  ${distro.name}` : distro.name, MARGIN + 3, r.y + 5)
-    const pctColor: RGB = pct > 90 ? [252, 165, 165] : pct > 70 ? [253, 230, 138] : [134, 239, 172]
-    rgb(pdf, pctColor, 'text')
-    pdf.text(`${kw(totalLoad)}  ·  ${pct}%`, W - MARGIN - 3, r.y + 5, { align: 'right' })
-    rgb(pdf, [156, 163, 175], 'text')
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-    pdf.text(`${distro.incomingRating}A · ${distro.phases}Ø · ${distro.circuits.length} circuits`, MARGIN + 3, r.y + 9)
-    pdf.text(
-      downstreamLoad > 0
-        ? `${kw(directLoad)} direct + ${kw(downstreamLoad)} downstream  ·  capacity ${kw(capacity)}`
-        : `${kw(directLoad)} direct  ·  capacity ${kw(capacity)}`,
-      W - MARGIN - 3, r.y + 9, { align: 'right' },
-    )
-    r.y += 11
+    const statusColor: RGB = pct > 90 ? C.red : pct > 70 ? C.amber : C.green
+    sectionHeading(r, distro.ref ? `${distro.ref} — ${distro.name}` : distro.name,
+      `${distro.incomingRating}A · ${distro.phases}Ø · ${distro.circuits.length} circuits`)
+    r.y -= 2
 
+    drawText(pdf, `${kw(totalLoad)}`, MARGIN, r.y + 3, { size: 9, bold: true })
+    drawText(pdf, `${pct}% of capacity`, MARGIN + 22, r.y + 3, { size: 6.5, color: statusColor, bold: true })
+    drawText(pdf,
+      downstreamLoad > 0
+        ? `${kw(directLoad)} direct + ${kw(downstreamLoad)} downstream   ·   capacity ${kw(capacity)}`
+        : `${kw(directLoad)} direct   ·   capacity ${kw(capacity)}`,
+      W - MARGIN, r.y + 3, { size: 6.5, color: C.mid, align: 'right' })
+    r.y += 5.5
+
+    // Utilisation bar — outline plus fill, so it survives a mono print
     rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN, r.y, totalW, 4, 'F')
-    rgb(pdf, pct > 90 ? C.red : pct > 70 ? C.amber : C.green, 'fill')
-    pdf.rect(MARGIN, r.y, totalW * Math.min(pct, 100) / 100, 4, 'F')
-    r.y += 6
+    pdf.rect(MARGIN, r.y, totalW, 2.6, 'F')
+    rgb(pdf, statusColor, 'fill')
+    pdf.rect(MARGIN, r.y, totalW * Math.min(pct, 100) / 100, 2.6, 'F')
+    rgb(pdf, C.mid, 'draw'); pdf.setLineWidth(PEN.hair)
+    pdf.rect(MARGIN, r.y, totalW, 2.6, 'S')
+    r.y += 7
 
     if (distro.phases === 3) {
       const byPhase = [1, 2, 3].map((ph) => {
@@ -838,21 +908,23 @@ export function buildPowerPDF(project: Project): BuiltPdf {
       const phColors: RGB[] = [[180, 140, 40], [50, 130, 200], [140, 60, 200]]
       byPhase.forEach(({ ph, load, cap }, i) => {
         const bx = MARGIN + i * (phW + 2)
-        rgb(pdf, C.faint, 'fill')
-        pdf.roundedRect(bx, r.y, phW, 12, 1, 1, 'F')
-        rgb(pdf, phColors[i], 'text')
-        pdf.setFont('helvetica', BOLD); pdf.setFontSize(7)
-        pdf.text(`L${ph}`, bx + 2.5, r.y + 5)
-        rgb(pdf, C.ink, 'text')
-        pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-        pdf.text(kw(load), bx + 10, r.y + 5)
-        rgb(pdf, C.light, 'text'); pdf.setFontSize(5.5)
-        pdf.text(`${kw(cap)} cap · ${cap > 0 ? Math.round(load / cap * 100) : 0}%`, bx + 2.5, r.y + 9.5)
+        const usage = cap > 0 ? Math.min(1, load / cap) : 0
+        rgb(pdf, C.white, 'fill'); rgb(pdf, C.faint, 'draw')
+        pdf.setLineWidth(PEN.hair)
+        pdf.rect(bx, r.y, phW, 11, 'FD')
+        // Phase colour tab
+        rgb(pdf, phColors[i], 'fill')
+        pdf.rect(bx, r.y, 1.6, 11, 'F')
+        drawText(pdf, `L${ph}`, bx + 3.5, r.y + 4.4, { size: 6.5, bold: true, color: phColors[i], spacing: 0.15 })
+        drawText(pdf, kw(load), bx + 11, r.y + 4.4, { size: 6.5, bold: true })
+        drawText(pdf, `${kw(cap)} capacity`, bx + 3.5, r.y + 8.4, { size: 5, color: C.mid })
+        drawText(pdf, `${Math.round(usage * 100)}%`, bx + phW - 2, r.y + 8.4, { size: 5.5, color: C.mid, align: 'right' })
       })
-      r.y += 14
+      r.y += 13.5
       if (imbalance > 15) {
-        rgb(pdf, C.amber, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(6.5)
-        pdf.text(`! Phase imbalance: ${imbalance.toFixed(0)}% — consider re-balancing circuits`, MARGIN + 2, r.y + 4)
+        drawText(pdf, `Phase imbalance ${imbalance.toFixed(0)}% — consider re-balancing circuits`, MARGIN, r.y + 3, {
+          size: 6.2, color: C.amber, bold: true,
+        })
         r.y += 7
       }
     }
@@ -889,12 +961,15 @@ export function buildPowerPDF(project: Project): BuiltPdf {
       }
     })
 
-    ensureSpace(r, 10)
-    rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN, r.y, totalW, 6, 'F')
-    rgb(pdf, C.mid, 'text'); pdf.setFont('helvetica', BOLD); pdf.setFontSize(6.5)
-    pdf.text(`TOTAL  ${kw(directLoad)}  ·  capacity ${kw(capacity)}  ·  headroom ${kw(capacity - directLoad)}`, MARGIN + 3, r.y + 4)
-    r.y += 10
+    ensureSpace(r, 12)
+    tableRule(pdf, MARGIN, r.y, totalW, true)
+    r.y += 4.2
+    drawCaption(pdf, 'Distro total', MARGIN + 1.5, r.y, { size: 4.6, color: C.ink })
+    drawText(pdf, `${kw(directLoad)}    capacity ${kw(capacity)}    headroom ${kw(capacity - directLoad)}`,
+      MARGIN + totalW - 1.5, r.y, { size: 7, bold: true, align: 'right' })
+    r.y += 1.6
+    tableRule(pdf, MARGIN, r.y, totalW, true)
+    r.y += 9
     r.repeatHeader = undefined
   }
 
@@ -904,7 +979,7 @@ export function buildPowerPDF(project: Project): BuiltPdf {
 // ── Groups PDF ────────────────────────────────────────────────────────────────
 
 export function buildGroupsPDF(project: Project): BuiltPdf {
-  const r = startReport(project, 'Groups')
+  const r = startReport(project, 'Groups', 'GROUP')
   const { pdf, W } = r
   const totalW = W - MARGIN * 2
   const { groups, fixtures } = project
@@ -928,26 +1003,17 @@ export function buildGroupsPDF(project: Project): BuiltPdf {
     const totalPow = members.reduce((s, f) => s + f.powerRating, 0)
     const totalWt = members.reduce((s, f) => s + f.weight, 0)
 
-    ensureSpace(r, 28)
+    if (!ensureSpace(r, 28)) r.y += 4
 
-    pdf.setFillColor(g.color || '#6b7280')
-    pdf.rect(MARGIN, r.y, 4, 10, 'F')
-    rgb(pdf, C.faint, 'fill')
-    pdf.rect(MARGIN + 4, r.y, totalW - 4, 10, 'F')
-    rgb(pdf, C.ink, 'text')
-    pdf.setFont('helvetica', BOLD); pdf.setFontSize(9)
-    pdf.text(fit(pdf, g.name, totalW * 0.5), MARGIN + 8, r.y + 5.5)
-    pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
-    rgb(pdf, C.mid, 'text')
-    pdf.text(
-      `${members.length} fixture${members.length !== 1 ? 's' : ''}  ·  ${(totalPow / 1000).toFixed(2)} kW  ·  ${totalWt.toFixed(1)} kg`,
-      W - MARGIN - 3, r.y + 5.5, { align: 'right' },
+    sectionHeading(
+      r,
+      g.name,
+      `${members.length} fixture${members.length !== 1 ? 's' : ''}   ·   ${(totalPow / 1000).toFixed(2)} kW   ·   ${totalWt.toFixed(1)} kg`,
+      g.color || '#6b7280',
     )
-    r.y += 10
 
     if (members.length === 0) {
-      rgb(pdf, C.light, 'text'); pdf.setFont('helvetica', NORMAL); pdf.setFontSize(7)
-      pdf.text('No fixtures in this group.', MARGIN + 3, r.y + 4)
+      drawText(pdf, 'No fixtures in this group.', MARGIN, r.y + 3, { size: 6.8, color: C.light })
       r.y += 8
       continue
     }

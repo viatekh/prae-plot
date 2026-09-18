@@ -51,10 +51,22 @@ reads the project data and emits PDF primitives, which means the drawing:
   pages of a set share one scale and origin, so the sheets overlay;
 - works whether or not the canvas is on screen.
 
+Sheets are set to drawing conventions: a trim border with zone references
+(A–F across, 1–4 down), a ranked pen table, a cell-grid title block carrying
+the drawing number, revision, sheet count and scale, and a key column holding
+the instrument summary, cable key, sheet data, north arrow and scale bar.
+Hanging positions print as real truss with bracing and a name tag; channel
+numbers sit in boxed tags; equipment racks print as line work so a mono copy
+still reads.
+
 Export options cover paper size (A4–A1), orientation, scale, which annotations
 to print (channel numbers, DMX addresses, fixture labels, cable lengths), the
 background image, the grid, the key column and colour-by-layer. The export
 dialog previews the actual PDF before you save it.
+
+The reports are set like technical schedules — tracked small caps, hairline
+rules, banded rows, right-aligned numerics, repeated headers and a sheet
+reference in the footer.
 
 Fixture symbol geometry lives in one place (`src/lib/symbolGeometry.ts`) and is
 consumed by both the canvas and the PDF renderer, so what you draw is what
