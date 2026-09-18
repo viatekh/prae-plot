@@ -328,7 +328,7 @@ function StageElementNode({ el, selected, scale, locked, vo, onClick, onDragStar
         }}
       >
         <Line points={[0, 0, ex, ey]} stroke={stroke} strokeWidth={(selected ? 5 : 4) / scale}
-          lineCap='round' hitStrokeWidth={20 / scale} />
+          lineCap='round' hitStrokeWidth={12 / scale} />
         {Array.from({ length: rungs + 1 }).map((_, i) => {
           const t = length > 0 ? (i * 0.5) / length : 0
           if (t > 1) return null
@@ -386,7 +386,7 @@ function StageElementNode({ el, selected, scale, locked, vo, onClick, onDragStar
         }}
       >
         <Line points={pts} stroke={selected ? '#f97316' : color} strokeWidth={(selected ? 2.5 : 2) / scale}
-          dash={[8 / scale, 4 / scale]} lineCap='round' lineJoin='round' hitStrokeWidth={16 / scale} />
+          dash={[8 / scale, 4 / scale]} lineCap='round' lineJoin='round' hitStrokeWidth={12 / scale} />
         {rel.map((p, i) => (
           <Circle key={i} x={p.x * BASE_PX} y={p.y * BASE_PX}
             radius={i === 0 || i === rel.length - 1 ? 3 / scale : 2 / scale}
