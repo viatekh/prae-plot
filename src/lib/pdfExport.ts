@@ -1,6 +1,6 @@
 import jsPDF from 'jspdf'
 import type { Project, CableElement, CableType } from '../types'
-import { CABLE_COLORS, CABLE_LABELS } from '../types'
+import { CABLE_COLORS, CABLE_LABELS, isFreeform } from '../types'
 import { formatVersion, cableLength } from './utils'
 import {
   DEFAULT_PLOT_OPTIONS, PAPER_LABELS, PEN, contentBounds, drawCaption, drawLegend, drawPlot,
@@ -459,7 +459,8 @@ export interface PlotExportRequest {
  * lib/plotVector.ts for why this is not a canvas screenshot.
  */
 export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): BuiltPdf {
-  const opts: PlotOptions = { ...DEFAULT_PLOT_OPTIONS, ...req.options }
+  // The drawing mode belongs to the project, not to the export dialog.
+  const opts: PlotOptions = { ...DEFAULT_PLOT_OPTIONS, ...req.options, freeform: isFreeform(project) }
   const pages: PlotPage[] = req.pages?.length ? req.pages : [{}]
   const { w: W, h: H } = paperDimensions(opts.paper, opts.orientation)
 
@@ -517,7 +518,7 @@ export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): Bui
 
     drawTitleBlock(pdf, project, W, H, {
       subtitle: page.label ? `Lighting Plot — ${page.label}` : 'Lighting Plot',
-      scaleLabel: `1:${result.scale.denominator}${result.scale.standard ? '' : '*'}`,
+      scaleLabel: result.scale.notToScale ? 'NTS' : `1:${result.scale.denominator}${result.scale.standard ? '' : '*'}`,
       paperLabel: `${PAPER_LABELS[opts.paper]} ${opts.orientation === 'landscape' ? 'L' : 'P'}`,
       sheetRef: `LX-${String(i + 1).padStart(2, '0')}`,
       layerLabel,
@@ -743,25 +744,43 @@ export function buildCablePDF(project: Project): BuiltPdf {
     byType.set(c.cableType, list)
   }
 
-  const runCols: Col[] = [
-    { label: '#', w: 9, align: 'right' },
-    { label: 'LABEL', w: 16 },
-    { label: 'FROM', w: 0 },
-    { label: 'TO', w: 40 },
-    { label: 'DRAWN', w: 20, align: 'right' },
-    { label: '+20%', w: 20, align: 'right' },
-  ]
+  const freeform = isFreeform(project)
+  const runCols: Col[] = freeform
+    ? [
+        { label: '#', w: 9, align: 'right' },
+        { label: 'LABEL', w: 16 },
+        { label: 'FROM', w: 0 },
+        { label: 'TO', w: 46 },
+        { label: 'LENGTH', w: 24, align: 'right' },
+      ]
+    : [
+        { label: '#', w: 9, align: 'right' },
+        { label: 'LABEL', w: 16 },
+        { label: 'FROM', w: 0 },
+        { label: 'TO', w: 40 },
+        { label: 'DRAWN', w: 20, align: 'right' },
+        { label: '+20%', w: 20, align: 'right' },
+      ]
   fillColumn(runCols, 2, totalW)
+  /** Length of a run for scheduling: measured, or typed in on a freeform plot. */
+  const runLength = (c: CableElement): number | null =>
+    freeform ? (c.manualLength ?? null) : cableLength(c)
 
   let runIdx = 1
   for (const [type, runs] of byType) {
     if (!ensureSpace(r, 32)) r.y += 3
 
-    const typeTotal = runs.reduce((s, c) => s + cableLength(c) * (1 + CABLE_OVERHEAD), 0)
+    const measured = runs.map(runLength).filter((l): l is number => l != null)
+    const typeTotal = measured.reduce((s, l) => s + l * (1 + CABLE_OVERHEAD), 0)
+    const unknown = runs.length - measured.length
     sectionHeading(
       r,
       CABLE_LABELS[type] ?? type,
-      `${runs.length} run${runs.length !== 1 ? 's' : ''}   ·   ${typeTotal.toFixed(1)} m total`,
+      [
+        `${runs.length} run${runs.length !== 1 ? 's' : ''}`,
+        measured.length > 0 ? `${typeTotal.toFixed(1)} m total` : null,
+        unknown > 0 ? `${unknown} without a length` : null,
+      ].filter(Boolean).join('   ·   '),
       CABLE_COLORS[type] ?? '#9ca3af',
     )
 
@@ -773,19 +792,22 @@ export function buildCablePDF(project: Project): BuiltPdf {
 
     runs.forEach((c, i) => {
       ensureSpace(r, ROW_H)
-      const plotM = cableLength(c)
-      const withOH = plotM * (1 + CABLE_OVERHEAD)
-      for (const [len, qty] of Object.entries(packRun(withOH, available))) {
-        breakdown[Number(len)] = (breakdown[Number(len)] ?? 0) + qty
+      const plotM = runLength(c)
+      const withOH = plotM == null ? null : plotM * (1 + CABLE_OVERHEAD)
+      if (withOH != null) {
+        for (const [len, qty] of Object.entries(packRun(withOH, available))) {
+          breakdown[Number(len)] = (breakdown[Number(len)] ?? 0) + qty
+        }
       }
-      r.y = tableRow(pdf, MARGIN, r.y, [
+      const cells = [
         String(runIdx++),
         c.autoLabel ?? '—',
         resolveName(c.startConnectedTo, project),
         resolveName(c.endConnectedTo, project),
-        `${plotM.toFixed(1)} m`,
-        `${withOH.toFixed(1)} m`,
-      ], runCols, i % 2 === 0, totalW)
+        plotM == null ? '—' : `${plotM.toFixed(1)} m`,
+      ]
+      if (!freeform) cells.push(withOH == null ? '—' : `${withOH.toFixed(1)} m`)
+      r.y = tableRow(pdf, MARGIN, r.y, cells, runCols, i % 2 === 0, totalW)
     })
 
     // Stock lengths to pull from the store
@@ -793,7 +815,9 @@ export function buildCablePDF(project: Project): BuiltPdf {
     ensureSpace(r, 22)
     tableRule(pdf, MARGIN, r.y, totalW)
     r.y += 4
-    drawCaption(pdf, 'Cables to pull — per run, incl. 20% slack', MARGIN, r.y, { size: 4.4 })
+    drawCaption(pdf, lengths.length > 0
+      ? 'Cables to pull — per run, incl. 20% slack'
+      : 'No run lengths entered yet — set a length on each cable', MARGIN, r.y, { size: 4.4 })
     r.y += 3.5
 
     lengths.forEach((len, i) => {
@@ -809,7 +833,7 @@ export function buildCablePDF(project: Project): BuiltPdf {
       drawText(pdf, String(qty), bx + 2.5, by + 6.2, { size: 9.5, bold: true, color: C.blue })
       drawText(pdf, `× ${len} m`, bx + 3.6 + qtyW, by + 6.2, { size: 7 })
     })
-    r.y += Math.ceil(Math.max(1, lengths.length) / 7) * 11 + 6
+    r.y += lengths.length > 0 ? Math.ceil(lengths.length / 7) * 11 + 6 : 3
   }
 
   return finishReport(r, 'Cables')

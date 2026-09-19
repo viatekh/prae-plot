@@ -64,6 +64,11 @@ export interface PlotOptions {
   showCableLabels: boolean
   showLegend: boolean
   colorByLayer: boolean
+  /**
+   * Schematic sheet: fills the frame, prints "not to scale", and drops every
+   * measurement derived from the geometry. Set from the project, not the UI.
+   */
+  freeform: boolean
 }
 
 export const DEFAULT_PLOT_OPTIONS: PlotOptions = {
@@ -78,6 +83,7 @@ export const DEFAULT_PLOT_OPTIONS: PlotOptions = {
   showCableLabels: true,
   showLegend: true,
   colorByLayer: false,
+  freeform: false,
 }
 
 // ── Content selection ─────────────────────────────────────────────────────────
@@ -183,6 +189,8 @@ export interface ScaleChoice {
   standard: boolean
   /** True when the drawing does not fit the frame at this scale. */
   overflow: boolean
+  /** Schematic sheet — the ratio is an artefact of fitting, not a statement. */
+  notToScale?: boolean
 }
 
 export function chooseScale(bounds: Bounds, frameW: number, frameH: number, requested: PlotOptions['scale']): ScaleChoice {
@@ -500,7 +508,8 @@ export function drawPlot(
     return { ...base, scale: { mmPerM: 20, denominator: 50, standard: true, overflow: false }, bounds: null }
   }
 
-  const scale = chooseScale(bounds, frame.w, frame.h, opts.scale)
+  const scale = chooseScale(bounds, frame.w, frame.h, opts.freeform ? 'fit' : opts.scale)
+  if (opts.freeform) scale.notToScale = true
   const t = makeTransform(bounds, frame, scale.mmPerM)
 
   clipped(pdf, frame, () => {
@@ -608,7 +617,7 @@ function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Tra
         centreLabel(pdf, p.label, (Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2)
       }
     } else if (el.type === 'truss') {
-      drawTruss(pdf, el as TrussElement, stroke, t)
+      drawTruss(pdf, el as TrussElement, stroke, t, opts.freeform)
     } else if (el.type === 'cable') {
       drawCable(pdf, el as CableElement, t, opts)
     } else if (el.type === 'text') {
@@ -634,7 +643,7 @@ function centreLabel(pdf: jsPDF, label: string, x: number, y: number) {
  * Hanging positions print as real truss: two chords with diagonal bracing and
  * end plates, plus a name tag. A single fat line reads as a wall, not a bar.
  */
-function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform) {
+function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform, freeform: boolean) {
   const x1 = t.x(te.x), y1 = t.y(te.y), x2 = t.x(te.x2), y2 = t.y(te.y2)
   const lengthM = Math.hypot(te.x2 - te.x, te.y2 - te.y)
   const lengthMm = Math.hypot(x2 - x1, y2 - y1)
@@ -679,9 +688,11 @@ function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform) {
   setDraw(pdf, stroke, PEN.hair)
   pdf.rect(cx - tagW / 2, cy - 2.2, tagW, 4.4, 'FD')
   drawText(pdf, label.toUpperCase(), cx, cy + 0.9, { size: 5, bold: true, spacing: 0.35, align: 'center', color: stroke })
-  drawText(pdf, `${lengthM.toFixed(2)} m`, cx, cy - 3.4, {
-    size: 4.2, color: MUTED, align: 'center', spacing: 0.1,
-  })
+  if (!freeform) {
+    drawText(pdf, `${lengthM.toFixed(2)} m`, cx, cy - 3.4, {
+      size: 4.2, color: MUTED, align: 'center', spacing: 0.1,
+    })
+  }
 }
 
 function drawCable(pdf: jsPDF, ce: CableElement, t: Transform, opts: PlotOptions) {
@@ -701,7 +712,9 @@ function drawCable(pdf: jsPDF, ce: CableElement, t: Transform, opts: PlotOptions
   pdf.circle(paper[paper.length - 2], paper[paper.length - 1], 0.55, 'F')
 
   if (!opts.showCableLabels) return
-  const label = [ce.autoLabel, ce.annotation, `${cableLength(ce).toFixed(1)}m`].filter(Boolean).join(' · ')
+  const runLength = opts.freeform ? ce.manualLength : cableLength(ce)
+  const label = [ce.autoLabel, ce.annotation, runLength != null ? `${runLength.toFixed(1)}m` : '']
+    .filter(Boolean).join(' · ')
   if (!label) return
   const mid = Math.floor(pts.length / 2)
   drawText(pdf, label, t.x(pts[mid].x) + 0.9, t.y(pts[mid].y) - 0.9, {
@@ -910,17 +923,30 @@ export function drawLegend(
       drawText(pdf, value, x + w, y, { size: 4.8, bold: true, align: 'right', maxW: w * 0.55 })
       y += 4.2
     }
-    y += 1.5
-    drawText(pdf, 'Do not scale from this drawing —', x, y, { size: 3.9, color: MUTED })
-    drawText(pdf, 'verify all dimensions on site.', x, y + 3, { size: 3.9, color: MUTED })
+    // The not-to-scale stamp already says this on a freeform sheet.
+    if (!result.scale.notToScale) {
+      y += 1.5
+      drawText(pdf, 'Do not scale from this drawing —', x, y, { size: 3.9, color: MUTED })
+      drawText(pdf, 'verify all dimensions on site.', x, y + 3, { size: 3.9, color: MUTED })
+    }
   }
 
   // ── North arrow + scale bar ─────────────────────────────────────────────
   const footY = frame.y + frame.h - 24
   setDraw(pdf, HAIRLINE, PEN.hair)
   pdf.line(x, footY - 3, x + w, footY - 3)
-  drawNorthArrow(pdf, x + 4.5, footY + 6)
-  drawScaleBar(pdf, x + 14, footY + 2, w - 14, result, paper)
+  if (result.scale.notToScale) {
+    setDraw(pdf, INK, PEN.archLight)
+    setFill(pdf, PAPER_WHITE)
+    pdf.rect(x, footY + 1, Math.min(w, 42), 8, 'FD')
+    drawText(pdf, 'NOT TO SCALE', x + Math.min(w, 42) / 2, footY + 6.2, {
+      size: 6, bold: true, spacing: 0.5, align: 'center',
+    })
+    drawText(pdf, 'Schematic — do not measure', x, footY + 13, { size: 4, color: MUTED })
+  } else {
+    drawNorthArrow(pdf, x + 4.5, footY + 6)
+    drawScaleBar(pdf, x + 14, footY + 2, w - 14, result, paper)
+  }
 }
 
 /** Plan north indicator. */

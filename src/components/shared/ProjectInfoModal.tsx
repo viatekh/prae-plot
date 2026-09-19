@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { X, Upload } from 'lucide-react'
 import { useProjectStore } from '../../store/projectStore'
-import type { ProjectInfo } from '../../types'
+import type { ProjectInfo, DrawingMode } from '../../types'
+import { DrawingModePicker } from './DrawingModePicker'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -67,18 +68,20 @@ export default function ProjectInfoModal() {
   if (!projectInfoModalOpen || !project) return null
   // Mounting the form only while the dialog is open seeds it from the project
   // once, instead of re-seeding it on every unrelated store update.
-  return <ProjectInfoForm initial={project.info} />
+  return <ProjectInfoForm initial={project.info} initialMode={project.drawingMode ?? 'scaled'} />
 }
 
-function ProjectInfoForm({ initial }: { initial: ProjectInfo }) {
-  const { setProjectInfoModalOpen, updateProjectInfo } = useProjectStore()
+function ProjectInfoForm({ initial, initialMode }: { initial: ProjectInfo; initialMode: DrawingMode }) {
+  const { setProjectInfoModalOpen, updateProjectInfo, setDrawingMode } = useProjectStore()
   const [form, setForm] = useState<ProjectInfo>({ ...initial })
+  const [mode, setMode] = useState<DrawingMode>(initialMode)
 
   const upd = (field: keyof ProjectInfo) => (value: string | undefined) =>
     setForm((f) => ({ ...f, [field]: value }))
 
   const handleSave = () => {
     updateProjectInfo(form)
+    setDrawingMode(mode)
     setProjectInfoModalOpen(false)
   }
 
@@ -120,6 +123,10 @@ function ProjectInfoForm({ initial }: { initial: ProjectInfo }) {
           <Field label='Client Name'>
             <Input value={form.clientName ?? ''} onChange={upd('clientName') as (v: string) => void} placeholder='Optional' />
           </Field>
+
+          <div className='col-span-2 border-t border-gray-200 pt-4'>
+            <DrawingModePicker value={mode} onChange={setMode} />
+          </div>
 
           <div className='col-span-2 border-t border-gray-200 pt-4 grid grid-cols-2 gap-4'>
             <LogoUpload label='Company Logo' value={form.companyLogo} onChange={(v) => setForm((f) => f ? { ...f, companyLogo: v } : f)} />

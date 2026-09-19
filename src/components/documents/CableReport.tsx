@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useProjectStore } from '../../store/projectStore'
 import type { CableElement, CableType } from '../../types'
-import { CABLE_COLORS, CABLE_LABELS } from '../../types'
+import { CABLE_COLORS, CABLE_LABELS, isFreeform } from '../../types'
 import { cableLength } from '../../lib/utils'
 
 // Standard rental lengths in metres, grouped by cable family
@@ -43,12 +43,14 @@ interface RunRow {
   label: string
   from: string
   to: string
-  plotM: number
-  withOverheadM: number
+  /** Null when the run has no length: a freeform plot cannot derive one. */
+  plotM: number | null
+  withOverheadM: number | null
 }
 
 export default function CableReport() {
   const { project } = useProjectStore()
+  const freeform = isFreeform(project)
   const [overhead, setOverhead] = useState(20) // %
   const [view, setView] = useState<'runs' | 'summary'>('runs')
 
@@ -79,15 +81,16 @@ export default function CableReport() {
     return '—'
   }
 
+  // A freeform plot has no measurable geometry: only lengths someone typed in.
   const runs: RunRow[] = cables.map((c) => {
-    const plot = cableLength(c)
+    const plot = freeform ? c.manualLength ?? null : cableLength(c)
     return {
       type: c.cableType,
       label: c.label || '',
       from: resolveName(c.startConnectedTo),
       to: resolveName(c.endConnectedTo),
       plotM: plot,
-      withOverheadM: plot * (1 + overhead / 100),
+      withOverheadM: plot == null ? null : plot * (1 + overhead / 100),
     }
   })
 
@@ -96,8 +99,8 @@ export default function CableReport() {
   for (const r of runs) {
     if (!byType[r.type]) byType[r.type] = { runs: [], total: 0, withOverhead: 0 }
     byType[r.type].runs.push(r)
-    byType[r.type].total += r.plotM
-    byType[r.type].withOverhead += r.withOverheadM
+    byType[r.type].total += r.plotM ?? 0
+    byType[r.type].withOverhead += r.withOverheadM ?? 0
   }
 
   return (
@@ -127,7 +130,7 @@ export default function CableReport() {
               <th className='px-2 py-1.5 text-left'>Type</th>
               <th className='px-2 py-1.5 text-left'>From</th>
               <th className='px-2 py-1.5 text-left'>To</th>
-              <th className='px-2 py-1.5 text-right'>Plotted</th>
+              <th className='px-2 py-1.5 text-right'>{freeform ? 'Length' : 'Plotted'}</th>
               <th className='px-2 py-1.5 text-right'>+OH</th>
             </tr>
           </thead>
@@ -142,16 +145,16 @@ export default function CableReport() {
                 </td>
                 <td className='px-2 py-1.5 text-gray-600 max-w-[80px] truncate' title={r.from}>{r.from}</td>
                 <td className='px-2 py-1.5 text-gray-600 max-w-[80px] truncate' title={r.to}>{r.to}</td>
-                <td className='px-2 py-1.5 text-right text-gray-600 font-mono'>{r.plotM.toFixed(1)}m</td>
-                <td className='px-2 py-1.5 text-right font-medium text-gray-800 font-mono'>{r.withOverheadM.toFixed(1)}m</td>
+                <td className='px-2 py-1.5 text-right text-gray-600 font-mono'>{r.plotM == null ? '—' : `${r.plotM.toFixed(1)}m`}</td>
+                <td className='px-2 py-1.5 text-right font-medium text-gray-800 font-mono'>{r.withOverheadM == null ? '—' : `${r.withOverheadM.toFixed(1)}m`}</td>
               </tr>
             ))}
           </tbody>
           <tfoot>
             <tr className='bg-gray-100 font-semibold border-t border-gray-300'>
               <td colSpan={3} className='px-2 py-1.5 text-gray-700'>{runs.length} cable run{runs.length !== 1 ? 's' : ''}</td>
-              <td className='px-2 py-1.5 text-right text-gray-700 font-mono'>{runs.reduce((s, r) => s + r.plotM, 0).toFixed(1)}m</td>
-              <td className='px-2 py-1.5 text-right text-gray-800 font-mono'>{runs.reduce((s, r) => s + r.withOverheadM, 0).toFixed(1)}m</td>
+              <td className='px-2 py-1.5 text-right text-gray-700 font-mono'>{runs.reduce((s, r) => s + (r.plotM ?? 0), 0).toFixed(1)}m</td>
+              <td className='px-2 py-1.5 text-right text-gray-800 font-mono'>{runs.reduce((s, r) => s + (r.withOverheadM ?? 0), 0).toFixed(1)}m</td>
             </tr>
           </tfoot>
         </table>

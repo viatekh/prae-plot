@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useProjectStore, computeCircuitLoad, circuitCapacityW, formatCircuitRef, findAddressConflicts, computeDistroLoad } from '../../store/projectStore'
 import type { AnyElement, PlacedFixture, RectElement, EllipseElement, TrussElement, TextElement, CableElement, CableType, Distro, Device } from '../../types'
-import { CABLE_COLORS, CABLE_LABELS, CABLE_GROUPS, DEFAULT_TEXT_CM } from '../../types'
+import { CABLE_COLORS, CABLE_LABELS, CABLE_GROUPS, DEFAULT_TEXT_CM, isFreeform } from '../../types'
 import { cableLength } from '../../lib/utils'
 
 /** Rounds for display without forcing trailing zeros, which eat the caret. */
@@ -54,6 +54,10 @@ function Select({ value, onChange, children }: { value: string | number; onChang
 
 function ElementProperties({ el }: { el: AnyElement }) {
   const { updateElement, project, labelDraftId, setLabelDraftId } = useProjectStore()
+  // In a freeform plot the coordinates are arbitrary units, so nothing is
+  // labelled in metres and nothing derived from the geometry is shown.
+  const freeform = isFreeform(project)
+  const unit = freeform ? '' : ' (m)'
   const upd = (updates: Partial<AnyElement>) => updateElement(el.id, updates)
 
   // A shape drawn on the canvas arrives here with its label field focused, so
@@ -93,20 +97,20 @@ function ElementProperties({ el }: { el: AnyElement }) {
 
       {el.type === 'rect' && (
         <div className='grid grid-cols-2 gap-2'>
-          <Field label='W (m)'>
+          <Field label={`W${unit}`}>
             <Input type='number' value={num((el as RectElement).width)} onChange={(v) => upd({ width: parseFloat(v) || 1 } as Partial<RectElement>)} />
           </Field>
-          <Field label='H (m)'>
+          <Field label={`H${unit}`}>
             <Input type='number' value={num((el as RectElement).height)} onChange={(v) => upd({ height: parseFloat(v) || 1 } as Partial<RectElement>)} />
           </Field>
         </div>
       )}
       {el.type === 'ellipse' && (
         <div className='grid grid-cols-2 gap-2'>
-          <Field label='Radius X (m)'>
+          <Field label={`Radius X${unit}`}>
             <Input type='number' value={num((el as EllipseElement).radiusX)} onChange={(v) => upd({ radiusX: parseFloat(v) || 1 } as Partial<EllipseElement>)} />
           </Field>
-          <Field label='Radius Y (m)'>
+          <Field label={`Radius Y${unit}`}>
             <Input type='number' value={num((el as EllipseElement).radiusY)} onChange={(v) => upd({ radiusY: parseFloat(v) || 1 } as Partial<EllipseElement>)} />
           </Field>
         </div>
@@ -114,10 +118,10 @@ function ElementProperties({ el }: { el: AnyElement }) {
 
       {el.type === 'truss' && (
         <div className='grid grid-cols-2 gap-2'>
-          <Field label='End X (m)'>
+          <Field label={`End X${unit}`}>
             <Input type='number' value={num((el as TrussElement).x2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
           </Field>
-          <Field label='End Y (m)'>
+          <Field label={`End Y${unit}`}>
             <Input type='number' value={num((el as TrussElement).y2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
           </Field>
         </div>
@@ -152,14 +156,14 @@ function ElementProperties({ el }: { el: AnyElement }) {
             </Select>
           </Field>
           <div className='grid grid-cols-2 gap-2'>
-            <Field label='End X (m)'>
+            <Field label={`End X${unit}`}>
               <Input type='number' value={num((el as CableElement).x2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<CableElement>)} />
             </Field>
-            <Field label='End Y (m)'>
+            <Field label={`End Y${unit}`}>
               <Input type='number' value={num((el as CableElement).y2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<CableElement>)} />
             </Field>
           </div>
-          {(() => {
+          {!freeform && (() => {
             const ce = el as CableElement
             const drawn = cableLength({ ...ce, manualLength: undefined })
             const segs = (ce.waypoints?.length ?? 0) + 1
@@ -170,7 +174,7 @@ function ElementProperties({ el }: { el: AnyElement }) {
               </div>
             )
           })()}
-          <Field label='Manual length override (m)'>
+          <Field label={freeform ? 'Cable length (m)' : 'Manual length override (m)'}>
             <div className='flex items-center gap-1.5'>
               <Input
                 type='number'

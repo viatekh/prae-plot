@@ -17,7 +17,7 @@ import type {
   FixtureGroup,
 } from '../types'
 import { DEFAULT_LAYERS, DEFAULT_VIEW_OPTIONS, SCHEMA_VERSION, isPowerCable } from '../types'
-import type { ViewOptions } from '../types'
+import type { ViewOptions, DrawingMode } from '../types'
 
 const MAX_HISTORY = 50
 const VIEW_OPTIONS_KEY = 'prae-plot:view-options'
@@ -93,7 +93,8 @@ interface ProjectStore {
   labelDraftId: string | null
 
   // ── Actions: project lifecycle ────────────────────────────
-  createProject: (info: ProjectInfo) => void
+  createProject: (info: ProjectInfo, drawingMode?: DrawingMode) => void
+  setDrawingMode: (mode: DrawingMode) => void
   loadProject: (project: Project) => void
   saveProject: () => void
   updateProjectInfo: (updates: Partial<ProjectInfo>) => void
@@ -170,12 +171,13 @@ interface ProjectStore {
   setSelectedFixtureType: (ft: GDTFFixtureType | null) => void
 }
 
-function newProject(info: ProjectInfo): Project {
+function newProject(info: ProjectInfo, drawingMode: DrawingMode = 'scaled'): Project {
   return {
     id: generateId(),
     info,
     version: 10,
     schemaVersion: SCHEMA_VERSION,
+    drawingMode,
     layers: DEFAULT_LAYERS.map((l) => ({ ...l })),
     elements: [],
     fixtures: [],
@@ -237,6 +239,7 @@ function normaliseProject(p: Project): Project {
   return {
     ...p,
     schemaVersion: SCHEMA_VERSION,
+    drawingMode: p.drawingMode ?? 'scaled',
     layers,
     backgroundImage: bg,
     elements,
@@ -268,8 +271,14 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   lastAutosave: null,
   labelDraftId: null,
 
-  createProject: (info) => {
-    set({ project: newProject(info), isDirty: false, past: [], future: [], selectedIds: [], activeLayerId: 'lighting' })
+  createProject: (info, drawingMode) => {
+    set({ project: newProject(info, drawingMode), isDirty: false, past: [], future: [], selectedIds: [], activeLayerId: 'lighting' })
+  },
+
+  setDrawingMode: (mode) => {
+    const { project } = get()
+    if (!project || project.drawingMode === mode) return
+    set({ project: { ...project, drawingMode: mode }, isDirty: true })
   },
 
   loadProject: (project) => {

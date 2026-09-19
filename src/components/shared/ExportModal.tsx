@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { X, FileText, Layers, Download, AlertTriangle, ExternalLink, Loader2 } from 'lucide-react'
 import type { Project } from '../../types'
+import { isFreeform } from '../../types'
 import {
   buildPlotPDF, buildPatchPDF, buildEquipmentPDF, buildCablePDF, buildPowerPDF, buildGroupsPDF, savePdf,
 } from '../../lib/pdfExport'
@@ -55,6 +56,7 @@ function SegButton<T extends string | number>({ options, value, onChange }: {
 
 export default function ExportModal({ project, onClose }: Props) {
   const viewOptions = useProjectStore((s) => s.viewOptions)
+  const freeform = isFreeform(project)
 
   const [tab, setTab] = useState<Tab>('plot')
   // Seed the sheet from what is on screen, so an export matches the canvas.
@@ -208,6 +210,13 @@ export default function ExportModal({ project, onClose }: Props) {
                   </div>
                 </div>
 
+                {freeform ? (
+                  <div className='text-xs text-gray-500 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 leading-snug'>
+                    <span className='font-semibold text-amber-700'>Freeform project.</span> The sheet fills the
+                    frame and prints <span className='font-mono'>NTS</span> — no scale bar, no measured lengths.
+                    Change this in project settings.
+                  </div>
+                ) : (
                 <div>
                   <div className='text-xs font-semibold text-gray-600 mb-1.5'>Drawing scale</div>
                   <SegButton<string>
@@ -224,6 +233,7 @@ export default function ExportModal({ project, onClose }: Props) {
                     snaps down to a conventional scale, which leaves a margin.
                   </div>
                 </div>
+                )}
 
                 <div>
                   <div className='text-xs font-semibold text-gray-600 mb-1.5'>Layers</div>
@@ -297,7 +307,9 @@ export default function ExportModal({ project, onClose }: Props) {
         <div className='px-5 py-3 border-t border-gray-200 flex items-center justify-between gap-2 shrink-0'>
           <div className='text-xs text-gray-400'>
             {tab === 'plot'
-              ? 'Drawn as vectors at a true scale — sharp at any zoom or print size.'
+              ? freeform
+                ? 'Drawn as vectors — sharp at any zoom or print size, but not to scale.'
+                : 'Drawn as vectors at a true scale — sharp at any zoom or print size.'
               : 'Preview is the exact file that will be saved.'}
           </div>
           <div className='flex items-center gap-2'>

@@ -1,7 +1,7 @@
 import { Crosshair, Image, Trash2, RotateCcw } from 'lucide-react'
 import { useProjectStore } from '../../store/projectStore'
 import { loadImageFile, cn } from '../../lib/utils'
-import { DEFAULT_VIEW_OPTIONS } from '../../types'
+import { DEFAULT_VIEW_OPTIONS, isFreeform } from '../../types'
 import type { ViewOptions } from '../../types'
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -43,6 +43,7 @@ export default function ViewPanel() {
     useProjectStore()
 
   const bg = project?.backgroundImage
+  const freeform = isFreeform(project)
 
   const flag = (key: keyof ViewOptions, label: string, hint?: string) => (
     <Row label={label} hint={hint}>
@@ -91,12 +92,12 @@ export default function ViewPanel() {
                   className={cn('text-xs px-1.5 py-0.5 rounded border transition-colors',
                     vo.gridSize === s ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-200 text-gray-600 hover:border-blue-400')}
                 >
-                  {s}m
+                  {freeform ? s : `${s}m`}
                 </button>
               ))}
             </div>
           </Row>
-          {flag('scaleBar', 'Scale bar')}
+          {!freeform && flag('scaleBar', 'Scale bar')}
         </Section>
 
         <Section title='Fixtures'>
@@ -114,7 +115,7 @@ export default function ViewPanel() {
 
         <Section title='Positions & shapes'>
           {flag('positionLabels', 'Position names')}
-          {flag('positionLengths', 'Position lengths')}
+          {!freeform && flag('positionLengths', 'Position lengths')}
           {flag('elementLabels', 'Shape labels')}
           {flag('deviceLabels', 'Device names')}
         </Section>
@@ -143,17 +144,19 @@ export default function ViewPanel() {
                 className='w-20 accent-blue-600'
               />
             </Row>
-            <Row label='Size' hint='Measured size of the image in the plot'>
-              <span className='text-xs text-gray-500 font-mono'>{bg.width.toFixed(1)} × {bg.height.toFixed(1)} m</span>
-            </Row>
-            <Row label='Scale to a known distance'>
-              <button
-                onClick={() => useProjectStore.getState().setActiveTool('calibrate')}
-                className='flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 transition-colors'
-              >
-                <Crosshair size={13} /> Calibrate
-              </button>
-            </Row>
+            {!freeform && <>
+              <Row label='Size' hint='Measured size of the image in the plot'>
+                <span className='text-xs text-gray-500 font-mono'>{bg.width.toFixed(1)} × {bg.height.toFixed(1)} m</span>
+              </Row>
+              <Row label='Scale to a known distance'>
+                <button
+                  onClick={() => useProjectStore.getState().setActiveTool('calibrate')}
+                  className='flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 transition-colors'
+                >
+                  <Crosshair size={13} /> Calibrate
+                </button>
+              </Row>
+            </>}
             <Row label='Remove image'>
               <button onClick={handleRemoveBg} className='flex items-center gap-1.5 text-xs text-red-500 hover:text-red-700 transition-colors'>
                 <Trash2 size={13} /> Remove

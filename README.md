@@ -99,6 +99,19 @@ src/
   types/index.ts          project model, cable and distro catalogues
 ```
 
+## Drawing modes
+
+A project is either a **scaled drawing** or a **freeform sketch**, chosen when
+you create it and changeable in project settings.
+
+In freeform, positions are arbitrary units rather than metres, and nothing that
+would be measured off the drawing is shown or printed: no scale bar, no scale
+ratio, no cursor coordinates, no truss lengths, no derived cable lengths. Sheets
+fill the frame and print `NTS` in the title block with a "not to scale" stamp in
+place of the scale bar. Lengths that are still real — a cable run, a fixture's
+weight and power — are typed in, and the cable schedule builds its stock-length
+recommendations from those, listing any run that still has no length.
+
 ## Editing
 
 Drawing tools place a shape and hand you its label field. Space or Escape drops

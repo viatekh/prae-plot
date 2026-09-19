@@ -164,7 +164,8 @@ export interface CableElement extends BaseElement {
   endConnectedTo?: string
   annotation?: string       // free-text printed alongside length on plot
   autoLabel?: string        // auto-assigned "C1", "C2" etc.
-  manualLength?: number     // override drawn length (m) — for unscaled plots
+  /** Real cable length in metres. The only length that exists in a freeform plot. */
+  manualLength?: number
 }
 
 export type AnyElement = RectElement | EllipseElement | PolygonElement | TrussElement | TextElement | CableElement
@@ -283,12 +284,23 @@ export interface ProjectInfo {
 /** Bumped when the stored shape of a project changes; see normaliseProject. */
 export const SCHEMA_VERSION = 2
 
+/**
+ * How the drawing relates to the real world.
+ *   scaled   — positions are metres; sheets print at a true scale.
+ *   freeform — a schematic. Positions are arbitrary units, nothing is measured
+ *              off the drawing, and sheets print "not to scale". Lengths that
+ *              still matter (a cable run, a fixture's weight) are typed in.
+ */
+export type DrawingMode = 'scaled' | 'freeform'
+
 export interface Project {
   id: string
   info: ProjectInfo
   version: number
   /** Absent on projects saved before migrations existed. */
   schemaVersion?: number
+  /** Absent on projects saved before freeform mode existed; treat as scaled. */
+  drawingMode?: DrawingMode
   backgroundImage?: BackgroundImage
   layers: Layer[]
   elements: AnyElement[]
@@ -448,6 +460,11 @@ export const CABLE_GROUPS: { label: string; types: CableType[] }[] = [
   { label: 'Audio', types: ['nl2', 'nl4', 'nl8', 'xlr', 'jack-ts', 'jack-trs', 'audio-multicore'] },
   { label: 'Other', types: ['other'] },
 ]
+
+/** True when the project is a schematic rather than a measured drawing. */
+export function isFreeform(project: { drawingMode?: DrawingMode } | null | undefined): boolean {
+  return project?.drawingMode === 'freeform'
+}
 
 export const DEFAULT_LAYERS: Layer[] = [
   { id: 'stage',    name: 'Stage',    color: '#6b7280', visible: true, locked: false, order: 0 },

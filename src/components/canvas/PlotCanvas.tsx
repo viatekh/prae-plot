@@ -8,7 +8,7 @@ import type {
   AnyElement, PlacedFixture, RectElement, EllipseElement, PolygonElement, TrussElement, TextElement, CableElement,
   Distro, ViewOptions,
 } from '../../types'
-import { CABLE_COLORS, DEFAULT_TEXT_CM } from '../../types'
+import { CABLE_COLORS, DEFAULT_TEXT_CM, isFreeform } from '../../types'
 import { SYMBOL_RADIUS, symbolColors } from '../../lib/symbols'
 import { symbolShapes, symbolLineWidth } from '../../lib/symbolGeometry'
 import type { FillRole } from '../../lib/symbolGeometry'
@@ -184,13 +184,15 @@ interface ElementNodeProps {
   scale: number
   locked: boolean
   vo: ViewOptions
+  /** Freeform plots have no measurable geometry, only lengths typed in by hand. */
+  freeform: boolean
   onClick: (e: KonvaEventObject<MouseEvent>) => void
   onDragStart: (id: string) => void
   /** Absolute new position in metres. */
   onDragEnd: (id: string, x: number, y: number) => void
 }
 
-function StageElementNode({ el, selected, scale, locked, vo, onClick, onDragStart, onDragEnd }: ElementNodeProps) {
+function StageElementNode({ el, selected, scale, locked, vo, freeform, onClick, onDragStart, onDragEnd }: ElementNodeProps) {
   const sw = (selected ? 2 : 1) / scale
   const stroke = selected ? '#f97316' : (el.stroke || '#374151')
   const draggable = !el.locked && !locked
@@ -308,7 +310,7 @@ function StageElementNode({ el, selected, scale, locked, vo, onClick, onDragStar
     const angle = Math.atan2(ey, ex)
     const dx = Math.sin(angle) * 4 / scale
     const dy = -Math.cos(angle) * 4 / scale
-    const caption = [vo.positionLabels && te.label, vo.positionLengths && `${length.toFixed(2)}m`]
+    const caption = [vo.positionLabels && te.label, !freeform && vo.positionLengths && `${length.toFixed(2)}m`]
       .filter(Boolean).join('  ')
     return (<>
       <Group
@@ -356,12 +358,12 @@ function StageElementNode({ el, selected, scale, locked, vo, onClick, onDragStar
       { x: ce.x2 - ce.x, y: ce.y2 - ce.y },
     ]
     const pts = rel.flatMap((p) => [p.x * BASE_PX, p.y * BASE_PX])
-    const length = cableLength(ce)
+    const length = freeform ? ce.manualLength : cableLength(ce)
     const mid = rel[Math.floor(rel.length / 2)]
     const caption = [
       vo.cableLabels && ce.autoLabel,
       vo.cableLabels && ce.annotation,
-      vo.cableLengths && `${length.toFixed(1)}m`,
+      vo.cableLengths && length != null && `${length.toFixed(1)}m`,
     ].filter(Boolean).join(' · ')
     return (<>
       <Group
@@ -553,6 +555,7 @@ export default function PlotCanvas() {
     setLabelDraftId,
   } = useProjectStore()
   const { gridSize } = vo
+  const freeform = isFreeform(project)
 
   // Alt held at pointer-down means "drag off a copy" rather than "move this".
   const altDragRef = useRef(false)
@@ -1092,6 +1095,7 @@ export default function PlotCanvas() {
               scale={view.scale}
               locked={isLocked(el.layerId)}
               vo={vo}
+              freeform={freeform}
               onDragStart={handleDragStart}
               onClick={(e) => {
                 if (isLocked(el.layerId)) return
@@ -1324,7 +1328,7 @@ export default function PlotCanvas() {
       </Stage>
 
       {/* Scale bar overlay */}
-      {vo.scaleBar && (() => {
+      {vo.scaleBar && !freeform && (() => {
         const pxPerMetre = BASE_PX * view.scale
         const targets = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100]
         const chosenM = targets.find((m) => m * pxPerMetre >= 60) ?? targets[targets.length - 1]
@@ -1339,10 +1343,15 @@ export default function PlotCanvas() {
         )
       })()}
 
-      {/* Cursor world position overlay */}
-      {cursorPos && (
+      {/* Cursor position — only meaningful on a measured drawing */}
+      {cursorPos && !freeform && (
         <div className='absolute bottom-2 left-2 bg-black/40 text-white text-xs font-mono px-2 py-0.5 rounded pointer-events-none select-none'>
           {cursorPos.x.toFixed(2)}m, {cursorPos.y.toFixed(2)}m
+        </div>
+      )}
+      {freeform && (
+        <div className='absolute bottom-2 left-2 text-xs font-medium text-gray-400 tracking-wide pointer-events-none select-none'>
+          FREEFORM · NOT TO SCALE
         </div>
       )}
     </div>

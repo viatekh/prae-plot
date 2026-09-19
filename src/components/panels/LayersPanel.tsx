@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Eye, EyeOff, Lock, Unlock, Plus, Trash2, ChevronUp, ChevronDown, Image } from 'lucide-react'
 import { useProjectStore } from '../../store/projectStore'
 import type { Layer } from '../../types'
+import { isFreeform } from '../../types'
 import { cn } from '../../lib/utils'
 
 const PRESET_COLORS = ['#6b7280', '#3b82f6', '#f97316', '#22c55e', '#ef4444', '#a855f7', '#ec4899', '#06b6d4']
@@ -19,7 +20,9 @@ function BgImageRow() {
       <Image size={12} className='text-amber-500 shrink-0' />
       <div className='flex-1 min-w-0'>
         <div className='text-xs font-medium text-gray-700 truncate'>Background Image</div>
-        <div className='text-xs text-gray-400'>{bg.width.toFixed(1)}m × {bg.height.toFixed(1)}m</div>
+        <div className='text-xs text-gray-400'>
+          {isFreeform(project) ? 'Reference image' : `${bg.width.toFixed(1)}m × ${bg.height.toFixed(1)}m`}
+        </div>
       </div>
       <div className='flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity'>
         <button

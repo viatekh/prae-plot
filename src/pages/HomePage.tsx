@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { Plus, FolderOpen, Zap, History, X } from 'lucide-react'
 import { useProjectStore, readAutosave, clearAutosave } from '../store/projectStore'
 import { loadJSONFile } from '../lib/utils'
-import type { ProjectInfo, Project } from '../types'
+import type { ProjectInfo, Project, DrawingMode } from '../types'
+import { DrawingModePicker } from '../components/shared/DrawingModePicker'
 
 const EMPTY_INFO: ProjectInfo = {
   name: '',
@@ -44,6 +45,7 @@ export default function HomePage() {
   const { createProject, loadProject } = useProjectStore()
   const [info, setInfo] = useState<ProjectInfo>(EMPTY_INFO)
   const [creating, setCreating] = useState(false)
+  const [mode, setMode] = useState<DrawingMode>('scaled')
   const [autosave, setAutosave] = useState(() => readAutosave())
   const [openError, setOpenError] = useState<string | null>(null)
 
@@ -51,7 +53,7 @@ export default function HomePage() {
 
   const handleCreate = () => {
     if (!info.name.trim()) return
-    createProject(info)
+    createProject(info, mode)
     navigate('/editor')
   }
 
@@ -120,6 +122,10 @@ export default function HomePage() {
               <Field label='Drawing Author'>
                 <Input value={info.drawingAuthor} onChange={upd('drawingAuthor')} />
               </Field>
+            </div>
+
+            <div className='mt-6'>
+              <DrawingModePicker value={mode} onChange={setMode} />
             </div>
 
             <div className='flex gap-3 mt-8'>
