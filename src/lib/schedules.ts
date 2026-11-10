@@ -114,3 +114,38 @@ export function patchByUniverse(project: Project): UniversePatch[] {
     return { universe, used: slots.reduce((s, n) => s + (n > 0 ? 1 : 0), 0), rows }
   })
 }
+
+// ── Patch CSV ─────────────────────────────────────────────────────────────────
+// A console or a visualiser will not read a PDF. This is the hookup as plain
+// columns, one fixture per row in channel order, for an importer that lets you
+// map columns to its own fields.
+
+const CSV_COLUMNS: [string, (r: ScheduleRow) => string | number][] = [
+  ['Channel', (r) => r.channel || ''],
+  ['Universe', (r) => r.universe],
+  ['Address', (r) => r.address],
+  // Some importers want one running number rather than universe and address.
+  ['Absolute Address', (r) => (r.universe - 1) * 512 + r.address],
+  ['Patch', (r) => `${r.universe}/${r.address}`],
+  ['Fixture Type', (r) => r.type],
+  ['Mode', (r) => r.mode],
+  ['Footprint', (r) => r.footprint],
+  ['Position', (r) => r.position],
+  ['Unit', (r) => r.unit || ''],
+  ['Purpose', (r) => r.purpose],
+  ['Colour', (r) => r.colour],
+  ['Circuit', (r) => (r.circuit === '—' ? '' : r.circuit)],
+  ['Notes', (r) => r.notes],
+]
+
+function csvCell(value: string | number): string {
+  const text = String(value)
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+export function buildPatchCSV(project: Project): string {
+  const lines = [CSV_COLUMNS.map(([name]) => name).join(',')]
+  for (const row of channelHookup(project)) lines.push(CSV_COLUMNS.map(([, pick]) => csvCell(pick(row))).join(','))
+  // CRLF line ends and a trailing one: what spreadsheet and console importers expect.
+  return lines.join('\r\n') + '\r\n'
+}

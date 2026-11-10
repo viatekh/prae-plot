@@ -9,7 +9,8 @@ import type { BuiltPdf, PlotPage } from '../../lib/pdfExport'
 import { DEFAULT_PLOT_OPTIONS, PAPER_LABELS, STANDARD_SCALES } from '../../lib/plotVector'
 import type { PlotOptions, PaperSize, Orientation } from '../../lib/plotVector'
 import { useProjectStore } from '../../store/projectStore'
-import { cn } from '../../lib/utils'
+import { cn, downloadText } from '../../lib/utils'
+import { buildPatchCSV } from '../../lib/schedules'
 
 export type ExportTab = 'plot' | 'instrument' | 'hookup' | 'patch' | 'equipment' | 'cable' | 'power' | 'groups'
 type Tab = ExportTab
@@ -154,6 +155,11 @@ export default function ExportModal({ project, initialTab, onClose }: Props) {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Export failed.')
     }
+  }
+
+  const handleCsv = () => {
+    const name = (project.info.name || 'Project').replace(/[^\w\-. ]+/g, '').trim().replace(/\s+/g, '_') || 'Project'
+    downloadText(buildPatchCSV(project), `${name}_Patch.csv`, 'text/csv')
   }
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
@@ -337,6 +343,15 @@ export default function ExportModal({ project, initialTab, onClose }: Props) {
               >
                 <ExternalLink size={13} /> Open
               </a>
+            )}
+            {(tab === 'patch' || tab === 'hookup') && project.fixtures.length > 0 && (
+              <button
+                onClick={handleCsv}
+                title='One fixture per row in channel order — for a console or visualiser patch import'
+                className='flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors'
+              >
+                <FileText size={13} /> Patch CSV
+              </button>
             )}
             <button onClick={onClose} className='px-4 py-2 text-sm text-gray-600 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors'>
               Cancel

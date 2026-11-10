@@ -55,7 +55,8 @@ different way: the **instrument schedule** (by position and unit, the order it
 is hung), the **channel hookup** (by channel, the order the desk sees it) and
 the **patch sheet** (by universe and address, with free addresses and clashes
 flagged). Plus the equipment list, cable schedule, power report, and network
-and DMX topology. All viewable in the app and exportable as PDF.
+and DMX topology. All viewable in the app and exportable as PDF. The patch also
+exports as a CSV, one fixture per row, for a console or visualiser import.
 
 ## The plot PDF
 

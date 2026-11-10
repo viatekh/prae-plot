@@ -34,6 +34,16 @@ export function downloadJSON(data: object, filename: string) {
   URL.revokeObjectURL(url)
 }
 
+export function downloadText(text: string, filename: string, mime = 'text/plain') {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 export function loadJSONFile(): Promise<object> {
   return new Promise((resolve, reject) => {
     const input = document.createElement('input')
