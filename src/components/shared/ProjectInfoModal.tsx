@@ -124,6 +124,18 @@ function ProjectInfoForm({ initial, initialMode }: { initial: ProjectInfo; initi
             <Input value={form.clientName ?? ''} onChange={upd('clientName') as (v: string) => void} placeholder='Optional' />
           </Field>
 
+          <div className='col-span-2'>
+            <Field label='General notes — printed on the plot, one per line'>
+              <textarea
+                value={form.notes ?? ''}
+                onChange={(e) => upd('notes')(e.target.value)}
+                rows={3}
+                placeholder={'All overhead fixtures to carry a safety bond.\nTrim heights are to the underside of the truss.'}
+                className='w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y'
+              />
+            </Field>
+          </div>
+
           <div className='col-span-2 border-t border-gray-200 pt-4'>
             <DrawingModePicker value={mode} onChange={setMode} />
           </div>

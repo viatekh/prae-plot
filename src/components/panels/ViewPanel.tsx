@@ -103,6 +103,9 @@ export default function ViewPanel() {
         <Section title='Fixtures'>
           {flag('channels', 'Channel numbers')}
           {flag('addresses', 'DMX addresses')}
+          {flag('unitNumbers', 'Unit numbers', 'Each fixture numbered along the truss it hangs on')}
+          {flag('colours', 'Colour / gel')}
+          {flag('purposes', 'Purpose')}
           {flag('fixtureLabels', 'Fixture labels')}
           {flag('circuitRefs', 'Circuit references', 'Show the power circuit under each fixture')}
           {flag('universeColors', 'Universe colours', 'Coloured ring around each fixture by DMX universe')}
@@ -121,6 +124,7 @@ export default function ViewPanel() {
         </Section>
 
         <Section title='Editing'>
+          {flag('snapToTruss', 'Hang fixtures on truss', 'A fixture dropped near a truss jumps onto it and joins that position')}
           <Row label='Auto-address on place' hint='Give each new fixture the next free DMX slot'>
             <Toggle on={autoAddress} onClick={() => setAutoAddress(!autoAddress)} />
           </Row>

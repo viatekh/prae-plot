@@ -4,6 +4,7 @@ import { useProjectStore } from '../../store/projectStore'
 import { parseGDTFFile } from '../../lib/gdtf'
 import type { GDTFFixtureType } from '../../types'
 import { cn } from '../../lib/utils'
+import { STARTER_LIBRARY } from '../../lib/starterLibrary'
 
 const SYMBOL_LABELS: Record<string, string> = {
   wash: 'Wash', spot: 'Spot', beam: 'Beam', par: 'Par',
@@ -21,6 +22,47 @@ const SYMBOL_COLORS: Record<string, string> = {
   other: 'bg-gray-100 text-gray-600',
 }
 
+function LibraryRow({ ft, active, onSelect, onRemove }: {
+  ft: GDTFFixtureType; active: boolean; onSelect: () => void; onRemove?: () => void
+}) {
+  return (
+    <div
+      onClick={onSelect}
+      className={cn(
+        'flex items-start gap-2 px-2 py-2 cursor-pointer border-b border-gray-100 hover:bg-gray-50 transition-colors',
+        active && 'bg-blue-50 border-l-2 border-l-blue-500',
+      )}
+    >
+      <div className='flex-1 min-w-0'>
+        <div className='text-xs font-medium text-gray-800 truncate'>{ft.name}</div>
+        <div className='flex items-center gap-1 mt-0.5 flex-wrap'>
+          <span className={cn('text-xs px-1 rounded', SYMBOL_COLORS[ft.symbol])}>
+            {SYMBOL_LABELS[ft.symbol]}
+          </span>
+          {onRemove && <span className='text-xs text-gray-500 truncate'>{ft.manufacturer}</span>}
+          {ft.powerConsumption !== undefined && <span className='text-xs text-gray-400'>{ft.powerConsumption}W</span>}
+          {ft.weight !== undefined && <span className='text-xs text-gray-400'>{ft.weight}kg</span>}
+          {ft.beamAngle !== undefined && <span className='text-xs text-gray-400'>{ft.beamAngle}°</span>}
+        </div>
+        {ft.modes.length > 0 && (
+          <div className='text-xs text-gray-400 truncate mt-0.5'>
+            {ft.modes.map((m) => `${m.name}${/\d/.test(m.name) ? '' : ` (${m.channelCount}ch)`}`).join(' · ')}
+          </div>
+        )}
+      </div>
+      {onRemove && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove() }}
+          className='text-gray-300 hover:text-red-400 transition-colors mt-0.5 shrink-0'
+          title='Remove from library'
+        >
+          <X size={12} />
+        </button>
+      )}
+    </div>
+  )
+}
+
 export default function FixtureLibrary() {
   const {
     gdtfLibrary, selectedFixtureType,
@@ -33,7 +75,7 @@ export default function FixtureLibrary() {
   const [importErrors, setImportErrors] = useState<string[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const filtered = gdtfLibrary.filter((f) => {
+  const matches = (f: GDTFFixtureType) => {
     if (!searchQuery.trim()) return true
     const q = searchQuery.toLowerCase()
     return (
@@ -41,7 +83,9 @@ export default function FixtureLibrary() {
       f.manufacturer.toLowerCase().includes(q) ||
       f.shortName.toLowerCase().includes(q)
     )
-  })
+  }
+  const filtered = gdtfLibrary.filter(matches)
+  const generics = STARTER_LIBRARY.filter(matches)
 
   const handleImportFiles = async (files: FileList | null) => {
     if (!files || files.length === 0) return
@@ -159,66 +203,35 @@ export default function FixtureLibrary() {
 
       {/* Library list */}
       <div className='flex-1 overflow-y-auto'>
-        {gdtfLibrary.length === 0 ? (
-          <div className='p-6 text-center text-xs text-gray-400 leading-relaxed'>
-            No fixtures in library yet.<br /><br />
-            <span className='text-gray-500'>1.</span> Go to <strong>GDTF Share</strong> (link above)<br />
-            <span className='text-gray-500'>2.</span> Download <code>.gdtf</code> files<br />
-            <span className='text-gray-500'>3.</span> Import them here<br /><br />
-            Your library is saved between sessions.
+        {filtered.length > 0 && (
+          <div className='px-2 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400'>
+            Your library · {gdtfLibrary.length}
           </div>
-        ) : filtered.length === 0 ? (
-          <div className='p-4 text-center text-xs text-gray-400'>No fixtures match "{searchQuery}"</div>
-        ) : null}
-
+        )}
         {filtered.map((ft) => (
-          <div
-            key={ft.id}
-            onClick={() => selectFixture(ft)}
-            className={cn(
-              'flex items-start gap-2 px-2 py-2 cursor-pointer border-b border-gray-100 hover:bg-gray-50 transition-colors',
-              selectedFixtureType?.id === ft.id && 'bg-blue-50 border-l-2 border-l-blue-500',
-            )}
-          >
-            <div className='flex-1 min-w-0'>
-              <div className='text-xs font-medium text-gray-800 truncate'>{ft.manufacturer}</div>
-              <div className='text-xs text-gray-600 truncate'>{ft.name}</div>
-              <div className='flex items-center gap-1 mt-0.5 flex-wrap'>
-                <span className={cn('text-xs px-1 rounded', SYMBOL_COLORS[ft.symbol])}>
-                  {SYMBOL_LABELS[ft.symbol]}
-                </span>
-                {ft.powerConsumption !== undefined && (
-                  <span className='text-xs text-gray-400'>{ft.powerConsumption}W</span>
-                )}
-                {ft.weight !== undefined && (
-                  <span className='text-xs text-gray-400'>{ft.weight}kg</span>
-                )}
-                {ft.beamAngle !== undefined && (
-                  <span className='text-xs text-gray-400'>{ft.beamAngle}°</span>
-                )}
-                {ft.colorTemperature !== undefined && (
-                  <span className='text-xs text-gray-400'>{ft.colorTemperature}K</span>
-                )}
-              </div>
-              {ft.modes.length > 0 && (
-                <div className='text-xs text-gray-400 truncate mt-0.5'>
-                  {ft.modes.map((m) => m.name).join(' · ')}
-                </div>
-              )}
-            </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); removeFromGDTFLibrary(ft.id) }}
-              className='text-gray-300 hover:text-red-400 transition-colors mt-0.5 shrink-0'
-              title='Remove from library'
-            >
-              <X size={12} />
-            </button>
-          </div>
+          <LibraryRow
+            key={ft.id} ft={ft} active={selectedFixtureType?.id === ft.id}
+            onSelect={() => selectFixture(ft)} onRemove={() => removeFromGDTFLibrary(ft.id)}
+          />
         ))}
 
-        {gdtfLibrary.length > 0 && (
-          <div className='px-2 py-2 text-xs text-gray-400 text-center'>
-            {gdtfLibrary.length} fixture type{gdtfLibrary.length !== 1 ? 's' : ''} in library
+        {generics.length > 0 && (
+          <div className='px-2 pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400'>
+            Generic fixtures
+          </div>
+        )}
+        {generics.map((ft) => (
+          <LibraryRow key={ft.id} ft={ft} active={selectedFixtureType?.id === ft.id} onSelect={() => selectFixture(ft)} />
+        ))}
+
+        {filtered.length + generics.length === 0 && (
+          <div className='p-4 text-center text-xs text-gray-400'>No fixtures match "{searchQuery}"</div>
+        )}
+
+        {gdtfLibrary.length === 0 && !searchQuery.trim() && (
+          <div className='px-3 py-3 text-xs text-gray-400 leading-relaxed border-t border-gray-100 mt-2'>
+            Generic fixtures get you drawing straight away. For exact modes, weight and power,
+            import the manufacturer's <code>.gdtf</code> file — imported fixtures are kept between sessions.
           </div>
         )}
       </div>
@@ -230,7 +243,7 @@ export default function FixtureLibrary() {
             <Zap size={11} />
             <span className='font-medium truncate'>Placing: {selectedFixtureType.shortName}</span>
           </div>
-          <div className='text-xs text-blue-500 mt-0.5'>Click canvas to place · F to select tool</div>
+          <div className='text-xs text-blue-500 mt-0.5'>Click the plot to place · snaps onto a truss · Esc when done</div>
         </div>
       )}
     </div>

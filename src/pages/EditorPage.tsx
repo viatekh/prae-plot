@@ -10,6 +10,7 @@ import { formatVersion, loadImageFile } from '../lib/utils'
 // Loaded on demand — it pulls in jsPDF, which is most of the bundle.
 const ExportModal = lazy(() => import('../components/shared/ExportModal'))
 import type { Project } from '../types'
+import type { ExportTab } from '../components/shared/ExportModal'
 import PlotCanvas from '../components/canvas/PlotCanvas'
 import FixtureLibrary from '../components/panels/FixtureLibrary'
 import LayersPanel from '../components/panels/LayersPanel'
@@ -19,7 +20,7 @@ import CablePanel from '../components/panels/CablePanel'
 import ViewPanel from '../components/panels/ViewPanel'
 import GroupsPanel from '../components/panels/GroupsPanel'
 import DevicesPanel from '../components/panels/DevicesPanel'
-import PatchSheet from '../components/documents/PatchSheet'
+import PatchSheet, { ChannelHookup, InstrumentSchedule } from '../components/documents/Schedules'
 import EquipmentReport from '../components/documents/EquipmentReport'
 import CableReport from '../components/documents/CableReport'
 import PowerReport from '../components/documents/PowerReport'
@@ -28,6 +29,18 @@ import DMXTopology from '../components/documents/DMXTopology'
 import ProjectInfoModal from '../components/shared/ProjectInfoModal'
 import { cn } from '../lib/utils'
 import type { ToolType } from '../types'
+
+type DocTab = 'instrument' | 'hookup' | 'patch' | 'equipment' | 'cable' | 'power' | 'network' | 'dmx'
+const DOC_TABS: { id: DocTab; label: string; exportTab?: ExportTab }[] = [
+  { id: 'instrument', label: 'Instrument Schedule', exportTab: 'instrument' },
+  { id: 'hookup', label: 'Channel Hookup', exportTab: 'hookup' },
+  { id: 'patch', label: 'Patch Sheet', exportTab: 'patch' },
+  { id: 'equipment', label: 'Equipment', exportTab: 'equipment' },
+  { id: 'cable', label: 'Cables', exportTab: 'cable' },
+  { id: 'power', label: 'Power', exportTab: 'power' },
+  { id: 'network', label: 'Network' },
+  { id: 'dmx', label: 'DMX Map' },
+]
 
 // ── Resize handle ─────────────────────────────────────────────
 function ResizeHandle({ onStart, onDelta }: { onStart: () => void; onDelta: (delta: number) => void }) {
@@ -80,7 +93,7 @@ function StripBtn({
 export default function EditorPage() {
   const navigate = useNavigate()
   const {
-    project, isDirty, saveProject, view,
+    project, isDirty, saveProject,
     activeTool, setActiveTool,
     activeLeftPanel, setActiveLeftPanel,
     mergeProject, lastAutosave,
@@ -88,7 +101,7 @@ export default function EditorPage() {
   } = useProjectStore()
 
   const [appMode, setAppMode] = useState<'plot' | 'documents'>('plot')
-  const [docTab, setDocTab] = useState<'patch' | 'equipment' | 'cable' | 'power' | 'network' | 'dmx'>('patch')
+  const [docTab, setDocTab] = useState<DocTab>('instrument')
   const [showExport, setShowExport] = useState(false)
 
   const [leftDrawerW, setLeftDrawerW] = useState(240)
@@ -159,7 +172,11 @@ export default function EditorPage() {
       <ProjectInfoModal />
       {showExport && (
         <Suspense fallback={null}>
-          <ExportModal project={project} onClose={() => setShowExport(false)} />
+          <ExportModal
+            project={project}
+            initialTab={appMode === 'documents' ? DOC_TABS.find((t) => t.id === docTab)?.exportTab : 'plot'}
+            onClose={() => setShowExport(false)}
+          />
         </Suspense>
       )}
 
@@ -221,24 +238,23 @@ export default function EditorPage() {
       {/* ── Documents mode ─────────────────────────────────────── */}
       {appMode === 'documents' && (
         <div className='flex flex-col flex-1 overflow-hidden bg-white'>
-          <div className='flex border-b border-gray-200 px-4 shrink-0'>
-            {(['patch', 'equipment', 'cable', 'power', 'network', 'dmx'] as const).map((t) => (
-              <button key={t} onClick={() => setDocTab(t)}
-                className={cn('px-4 py-2.5 text-sm font-medium border-b-2 transition-colors',
-                  docTab === t ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700')}>
-                {t === 'patch' ? 'Patch Sheet' : t === 'equipment' ? 'Equipment' : t === 'cable' ? 'Cables' : t === 'power' ? 'Power' : t === 'network' ? 'Network' : 'DMX Map'}
+          <div className='flex border-b border-gray-200 px-4 shrink-0 overflow-x-auto'>
+            {DOC_TABS.map((t) => (
+              <button key={t.id} onClick={() => setDocTab(t.id)}
+                className={cn('px-3.5 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap',
+                  docTab === t.id ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700')}>
+                {t.label}
               </button>
             ))}
             <div className='flex-1' />
-            <span className='self-center text-xs text-gray-400 pr-3'>
-              Generated {new Date().toLocaleString()}
-            </span>
             <button onClick={() => setShowExport(true)}
               className='my-1.5 flex items-center gap-1.5 text-xs bg-blue-600 text-white px-3 py-1 rounded hover:bg-blue-700 transition-colors'>
               <Download size={12} /> Export PDF
             </button>
           </div>
           <div className='flex-1 overflow-auto p-6'>
+            {docTab === 'instrument' && <InstrumentSchedule />}
+            {docTab === 'hookup'    && <ChannelHookup />}
             {docTab === 'patch'     && <PatchSheet />}
             {docTab === 'equipment' && <EquipmentReport />}
             {docTab === 'cable'     && <CableReport />}
@@ -323,7 +339,6 @@ export default function EditorPage() {
               <PropertiesPanel />
             </div>
             <div className='shrink-0 border-t border-gray-200 px-2 py-1 flex items-center gap-2 text-xs text-gray-400 flex-wrap'>
-              <span className='font-mono'>{Math.round(view.scale * 100)}%</span>
               <span>{project.fixtures.length} fx</span>
               {project.fixtures.length > 0 && <>
                 <span>{(project.fixtures.reduce((s, f) => s + f.powerRating, 0) / 1000).toFixed(1)}kW</span>

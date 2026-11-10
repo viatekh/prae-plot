@@ -141,3 +141,32 @@ export function symbolLineWidth(w: number, base = 1): number {
   if (w <= 0) return 0
   return (w >= 2 ? 2 : w * 1.2) * base
 }
+
+/**
+ * Bounding box of a symbol in radius units once it has been rotated — what the
+ * annotations around a fixture have to clear.
+ */
+export function symbolBox(type: FixtureSymbolType, rotationDeg = 0): { minX: number; minY: number; maxX: number; maxY: number } {
+  const rad = (rotationDeg * Math.PI) / 180
+  const cos = Math.cos(rad), sin = Math.sin(rad)
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+  const add = (x: number, y: number) => {
+    const rx = x * cos - y * sin, ry = x * sin + y * cos
+    minX = Math.min(minX, rx); maxX = Math.max(maxX, rx)
+    minY = Math.min(minY, ry); maxY = Math.max(maxY, ry)
+  }
+  for (const p of symbolShapes(type)) {
+    if (p.k === 'circle') {
+      // A circle's box does not turn with it, only its centre does.
+      const cx = p.cx ?? 0, cy = p.cy ?? 0
+      const rx = cx * cos - cy * sin, ry = cx * sin + cy * cos
+      minX = Math.min(minX, rx - p.r); maxX = Math.max(maxX, rx + p.r)
+      minY = Math.min(minY, ry - p.r); maxY = Math.max(maxY, ry + p.r)
+    } else if (p.k === 'rect') {
+      add(p.x, p.y); add(p.x + p.w, p.y); add(p.x + p.w, p.y + p.h); add(p.x, p.y + p.h)
+    } else {
+      for (let i = 0; i < p.pts.length; i += 2) add(p.pts[i], p.pts[i + 1])
+    }
+  }
+  return { minX, minY, maxX, maxY }
+}

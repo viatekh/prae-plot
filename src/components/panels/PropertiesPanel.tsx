@@ -1,8 +1,13 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import {
+  AlignStartVertical, AlignCenterVertical, AlignEndVertical, AlignStartHorizontal, AlignCenterHorizontal,
+  AlignEndHorizontal, AlignHorizontalDistributeCenter, AlignVerticalDistributeCenter,
+} from 'lucide-react'
 import { useProjectStore, computeCircuitLoad, circuitCapacityW, formatCircuitRef, findAddressConflicts, computeDistroLoad } from '../../store/projectStore'
 import type { AnyElement, PlacedFixture, RectElement, EllipseElement, TrussElement, TextElement, CableElement, CableType, Distro, Device } from '../../types'
 import { CABLE_COLORS, CABLE_LABELS, CABLE_GROUPS, DEFAULT_TEXT_CM, isFreeform } from '../../types'
 import { cableLength } from '../../lib/utils'
+import { resolvePositions } from '../../lib/positions'
 
 /** Rounds for display without forcing trailing zeros, which eat the caret. */
 function num(v: number, dp = 2): number {
@@ -49,6 +54,116 @@ function Select({ value, onChange, children }: { value: string | number; onChang
     >
       {children}
     </select>
+  )
+}
+
+/** What hangs on a truss, and which end its unit numbers start from. */
+function TrussPosition({ truss }: { truss: TrussElement }) {
+  const { project, updateElement, setSelectedIds } = useProjectStore()
+  if (!project) return null
+  const position = resolvePositions(project).positions.find((p) => p.id === truss.id)
+  const count = position?.fixtures.length ?? 0
+  const kg = position?.fixtures.reduce((s, f) => s + f.weight, 0) ?? 0
+  const kw = (position?.fixtures.reduce((s, f) => s + f.powerRating, 0) ?? 0) / 1000
+  return (
+    <div className='bg-gray-50 border border-gray-200 rounded px-2.5 py-2 text-xs text-gray-600 flex flex-col gap-1.5'>
+      {count === 0 ? (
+        <span className='text-gray-400'>Nothing hangs here yet. Drop fixtures onto the truss and they join this position.</span>
+      ) : (
+        <div className='flex items-center justify-between gap-2'>
+          <span><span className='font-semibold text-gray-800'>{count}</span> unit{count !== 1 ? 's' : ''} · {kg.toFixed(1)} kg · {kw.toFixed(1)} kW</span>
+          <button className='text-blue-600 hover:text-blue-800 shrink-0' onClick={() => setSelectedIds(position!.fixtures.map((f) => f.id))}>
+            Select them
+          </button>
+        </div>
+      )}
+      <label className='flex items-center gap-2 cursor-pointer'>
+        <input
+          type='checkbox' className='rounded accent-blue-600' checked={!!truss.numberFromEnd}
+          onChange={(e) => updateElement(truss.id, { numberFromEnd: e.target.checked } as Partial<AnyElement>)}
+        />
+        Number units from the other end
+      </label>
+    </div>
+  )
+}
+
+/** Where a fixture hangs — worked out from where it sits, never typed in. */
+function FixturePositionBadge({ fixture }: { fixture: PlacedFixture }) {
+  const project = useProjectStore((s) => s.project)
+  if (!project) return null
+  const pos = resolvePositions(project).byFixture.get(fixture.id)
+  if (!pos?.positionId) {
+    if (!project.elements.some((e) => e.type === 'truss')) return null
+    return <div className='text-xs text-gray-400'>Not on a position — drag it onto a truss to hang it there.</div>
+  }
+  return (
+    <div className='flex items-center gap-2 text-xs'>
+      <span className='font-semibold text-gray-800 bg-gray-100 rounded px-1.5 py-0.5'>{pos.position}</span>
+      <span className='text-gray-500'>unit {pos.unit}</span>
+    </div>
+  )
+}
+
+/** Edits applied to every selected fixture at once. */
+function BulkFixtureEdit({ fixtures }: { fixtures: PlacedFixture[] }) {
+  const { updateFixture, project } = useProjectStore()
+  const [startChannel, setStartChannel] = useState('')
+  if (fixtures.length < 2 || !project) return null
+
+  /** The shared value, or '' when the selection disagrees. */
+  const shared = (pick: (f: PlacedFixture) => string) => {
+    const first = pick(fixtures[0])
+    return fixtures.every((f) => pick(f) === first) ? first : ''
+  }
+  const setAll = (updates: Partial<PlacedFixture>) => { for (const f of fixtures) updateFixture(f.id, updates) }
+  const mixed = (pick: (f: PlacedFixture) => string) => (shared(pick) === '' && fixtures.some((f) => pick(f) !== '') ? 'Mixed' : '')
+
+  // Renumber in hang order: position by position along each truss, then the rest.
+  const renumber = () => {
+    const start = parseInt(startChannel)
+    if (isNaN(start) || start < 1) return
+    const { positions, loose } = resolvePositions(project)
+    const ids = new Set(fixtures.map((f) => f.id))
+    const ordered = [...positions.flatMap((p) => p.fixtures), ...loose].filter((f) => ids.has(f.id))
+    ordered.forEach((f, i) => updateFixture(f.id, { channel: start + i }))
+    setStartChannel('')
+  }
+
+  return (
+    <div className='flex flex-col gap-2.5 border-t border-gray-100 pt-3'>
+      <div className='text-xs text-gray-400 font-medium uppercase tracking-wide'>Edit {fixtures.length} fixtures</div>
+      <Field label='Purpose'>
+        <Input value={shared((f) => f.purpose ?? '')} placeholder={mixed((f) => f.purpose ?? '')} onChange={(v) => setAll({ purpose: v })} />
+      </Field>
+      <div className='grid grid-cols-2 gap-2'>
+        <Field label='Colour / Gel'>
+          <Input value={shared((f) => f.color ?? '')} placeholder={mixed((f) => f.color ?? '')} onChange={(v) => setAll({ color: v })} />
+        </Field>
+        <Field label='Rotation (°)'>
+          <Input type='number' value={shared((f) => String(num(f.rotation, 1)))} placeholder='Mixed' onChange={(v) => setAll({ rotation: parseFloat(v) || 0 })} />
+        </Field>
+      </div>
+      <Field label='Layer'>
+        <Select value={shared((f) => f.layerId ?? '')} onChange={(v) => { if (v) setAll({ layerId: v }) }}>
+          <option value=''>— Mixed —</option>
+          {project.layers.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}
+        </Select>
+      </Field>
+      <Field label='Renumber channels from'>
+        <div className='flex gap-1.5'>
+          <Input type='number' value={startChannel} placeholder='e.g. 101' onChange={setStartChannel} />
+          <button
+            onClick={renumber}
+            disabled={!startChannel}
+            className='shrink-0 px-2.5 text-xs font-medium rounded bg-blue-600 text-white hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 transition-colors'
+          >
+            Renumber
+          </button>
+        </div>
+        <div className='text-[11px] text-gray-400 mt-1 leading-snug'>Numbered in hang order — along each truss, position by position.</div>
+      </Field>
+    </div>
   )
 }
 
@@ -116,7 +231,7 @@ function ElementProperties({ el }: { el: AnyElement }) {
         </div>
       )}
 
-      {el.type === 'truss' && (
+      {el.type === 'truss' && (<>
         <div className='grid grid-cols-2 gap-2'>
           <Field label={`End X${unit}`}>
             <Input type='number' value={num((el as TrussElement).x2)} onChange={(v) => upd({ x2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
@@ -125,7 +240,15 @@ function ElementProperties({ el }: { el: AnyElement }) {
             <Input type='number' value={num((el as TrussElement).y2)} onChange={(v) => upd({ y2: parseFloat(v) || 0 } as Partial<TrussElement>)} />
           </Field>
         </div>
-      )}
+        <Field label='Trim height (m)'>
+          <Input
+            type='number' placeholder='Height above the deck'
+            value={(el as TrussElement).trim ?? ''}
+            onChange={(v) => upd({ trim: v === '' || isNaN(parseFloat(v)) ? undefined : parseFloat(v) } as Partial<TrussElement>)}
+          />
+        </Field>
+        <TrussPosition truss={el as TrussElement} />
+      </>)}
 
       {el.type === 'cable' && (
         <>
@@ -287,8 +410,14 @@ function FixtureProperties({ fixture }: { fixture: PlacedFixture }) {
         <Input type='number' value={fixture.channel} onChange={(v) => upd({ channel: parseInt(v) || 0 })} />
       </Field>
 
+      <FixturePositionBadge fixture={fixture} />
+
+      <Field label='Purpose'>
+        <Input value={fixture.purpose ?? ''} onChange={(v) => upd({ purpose: v })} placeholder='e.g. Front wash, DS special' />
+      </Field>
+
       <Field label='Label'>
-        <Input value={fixture.label} onChange={(v) => upd({ label: v })} />
+        <Input value={fixture.label} onChange={(v) => upd({ label: v })} placeholder='Free note printed under the fixture' />
       </Field>
 
       <div className='grid grid-cols-2 gap-2'>
@@ -594,13 +723,13 @@ function AlignTools() {
   return (
     <div className='p-3 border-t border-gray-100 mt-2'>
       <div className='text-xs text-gray-400 font-medium mb-2 uppercase tracking-wide'>Align {selectedIds.length} items</div>
-      <div className='grid grid-cols-3 gap-1 text-xs'>
-        <button className={btn} onClick={() => applyX(() => minX)} title='Align left'>⬤←</button>
-        <button className={btn} onClick={() => applyX(() => midX)} title='Centre horizontal'>⬤↔</button>
-        <button className={btn} onClick={() => applyX(() => maxX)} title='Align right'>→⬤</button>
-        <button className={btn} onClick={() => applyY(() => minY)} title='Align top'>⬤↑</button>
-        <button className={btn} onClick={() => applyY(() => midY)} title='Centre vertical'>⬤↕</button>
-        <button className={btn} onClick={() => applyY(() => maxY)} title='Align bottom'>↓⬤</button>
+      <div className='grid grid-cols-6 gap-1 text-xs'>
+        <button className={btn} onClick={() => applyX(() => minX)} title='Align left'><AlignStartVertical size={15} /></button>
+        <button className={btn} onClick={() => applyX(() => midX)} title='Align centres (horizontal)'><AlignCenterVertical size={15} /></button>
+        <button className={btn} onClick={() => applyX(() => maxX)} title='Align right'><AlignEndVertical size={15} /></button>
+        <button className={btn} onClick={() => applyY(() => minY)} title='Align top'><AlignStartHorizontal size={15} /></button>
+        <button className={btn} onClick={() => applyY(() => midY)} title='Align centres (vertical)'><AlignCenterHorizontal size={15} /></button>
+        <button className={btn} onClick={() => applyY(() => maxY)} title='Align bottom'><AlignEndHorizontal size={15} /></button>
       </div>
       <div className='grid grid-cols-2 gap-1 mt-1'>
         <button className={btn}
@@ -614,7 +743,7 @@ function AlignTools() {
               else updateElement(item.id, { x: sorted[0].x + i * step } as Partial<AnyElement>)
             })
           }}
-        >Space H</button>
+        ><AlignHorizontalDistributeCenter size={15} className='mr-1.5' /> Space evenly</button>
         <button className={btn}
           title='Space evenly vertical'
           onClick={() => {
@@ -626,7 +755,7 @@ function AlignTools() {
               else updateElement(item.id, { y: sorted[0].y + i * step } as Partial<AnyElement>)
             })
           }}
-        >Space V</button>
+        ><AlignVerticalDistributeCenter size={15} className='mr-1.5' /> Space evenly</button>
       </div>
     </div>
   )
@@ -667,6 +796,7 @@ export default function PropertiesPanel() {
             ))}
           </div>
         )}
+        <BulkFixtureEdit fixtures={project.fixtures.filter((f) => selectedIds.includes(f.id))} />
         <AlignTools />
       </div>
     )

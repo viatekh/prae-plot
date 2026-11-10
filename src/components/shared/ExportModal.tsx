@@ -3,7 +3,7 @@ import { X, FileText, Layers, Download, AlertTriangle, ExternalLink, Loader2 } f
 import type { Project } from '../../types'
 import { isFreeform } from '../../types'
 import {
-  buildPlotPDF, buildPatchPDF, buildEquipmentPDF, buildCablePDF, buildPowerPDF, buildGroupsPDF, savePdf,
+  buildPlotPDF, buildPatchPDF, buildHookupPDF, buildInstrumentPDF, buildEquipmentPDF, buildCablePDF, buildPowerPDF, buildGroupsPDF, savePdf,
 } from '../../lib/pdfExport'
 import type { BuiltPdf, PlotPage } from '../../lib/pdfExport'
 import { DEFAULT_PLOT_OPTIONS, PAPER_LABELS, STANDARD_SCALES } from '../../lib/plotVector'
@@ -11,15 +11,20 @@ import type { PlotOptions, PaperSize, Orientation } from '../../lib/plotVector'
 import { useProjectStore } from '../../store/projectStore'
 import { cn } from '../../lib/utils'
 
-type Tab = 'plot' | 'patch' | 'equipment' | 'cable' | 'power' | 'groups'
+export type ExportTab = 'plot' | 'instrument' | 'hookup' | 'patch' | 'equipment' | 'cable' | 'power' | 'groups'
+type Tab = ExportTab
 
 interface Props {
   project: Project
+  /** Opens on this document — the one the user was looking at. */
+  initialTab?: ExportTab
   onClose: () => void
 }
 
 const TAB_BLURB: Record<Exclude<Tab, 'plot'>, string> = {
-  patch: 'Every fixture sorted by channel, with patch addresses, circuit assignments, mode and notes. A4 portrait.',
+  instrument: 'The rig in the order it is hung: fixtures grouped by truss and numbered along it, with load, purpose, colour, channel and address. A4 portrait.',
+  hookup: 'The rig in channel order: what each channel is, where it hangs, what it is for and how it is patched. A4 portrait.',
+  patch: 'The rig in address order, universe by universe, with footprints, free addresses and any clashes flagged. A4 portrait.',
   equipment: 'Fixtures grouped by model with quantities, weight and power draw, followed by placed devices. A4 portrait.',
   cable: 'Cable schedule by type: run-by-run lengths with from/to nodes, plus the stock lengths to pull. A4 portrait.',
   power: 'Load summary, per-distro breakdown with circuit utilisation and phase balance for 3Ø distros. A4 portrait.',
@@ -54,17 +59,20 @@ function SegButton<T extends string | number>({ options, value, onChange }: {
   )
 }
 
-export default function ExportModal({ project, onClose }: Props) {
+export default function ExportModal({ project, initialTab, onClose }: Props) {
   const viewOptions = useProjectStore((s) => s.viewOptions)
   const freeform = isFreeform(project)
 
-  const [tab, setTab] = useState<Tab>('plot')
+  const [tab, setTab] = useState<Tab>(initialTab ?? 'plot')
   // Seed the sheet from what is on screen, so an export matches the canvas.
   const [opts, setOpts] = useState<PlotOptions>(() => ({
     ...DEFAULT_PLOT_OPTIONS,
     showGrid: viewOptions.grid,
     showChannels: viewOptions.channels,
     showAddresses: viewOptions.addresses,
+    showUnitNumbers: viewOptions.unitNumbers,
+    showColours: viewOptions.colours,
+    showPurposes: viewOptions.purposes,
     showFixtureLabels: viewOptions.fixtureLabels,
     showCableLabels: viewOptions.cableLabels || viewOptions.cableLengths,
   }))
@@ -104,6 +112,8 @@ export default function ExportModal({ project, onClose }: Props) {
           : [{ layerIds }]
         return buildPlotPDF(project, { options: opts, pages: pages.length ? pages : [{ layerIds: [] }], gridSize: viewOptions.gridSize })
       }
+      case 'instrument': return buildInstrumentPDF(project)
+      case 'hookup': return buildHookupPDF(project)
       case 'patch': return buildPatchPDF(project)
       case 'equipment': return buildEquipmentPDF(project)
       case 'cable': return buildCablePDF(project)
@@ -148,6 +158,8 @@ export default function ExportModal({ project, onClose }: Props) {
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
     { id: 'plot', label: 'Plot', icon: <Layers size={13} /> },
+    { id: 'instrument', label: 'Instrument Schedule', icon: <FileText size={13} /> },
+    { id: 'hookup', label: 'Channel Hookup', icon: <FileText size={13} /> },
     { id: 'patch', label: 'Patch Sheet', icon: <FileText size={13} /> },
     { id: 'equipment', label: 'Equipment', icon: <FileText size={13} /> },
     { id: 'cable', label: 'Cables', icon: <FileText size={13} /> },
@@ -260,11 +272,14 @@ export default function ExportModal({ project, onClose }: Props) {
                   <div className='text-xs font-semibold text-gray-600 mb-1.5'>Show on drawing</div>
                   <Toggle label='Channel numbers' checked={opts.showChannels} onChange={(v) => setOpt('showChannels', v)} />
                   <Toggle label='DMX addresses' checked={opts.showAddresses} onChange={(v) => setOpt('showAddresses', v)} />
+                  <Toggle label='Unit numbers' checked={opts.showUnitNumbers} onChange={(v) => setOpt('showUnitNumbers', v)} hint='Each fixture numbered along its truss' />
+                  <Toggle label='Colour / gel' checked={opts.showColours} onChange={(v) => setOpt('showColours', v)} />
+                  <Toggle label='Purpose' checked={opts.showPurposes} onChange={(v) => setOpt('showPurposes', v)} />
                   <Toggle label='Fixture labels' checked={opts.showFixtureLabels} onChange={(v) => setOpt('showFixtureLabels', v)} />
                   <Toggle label='Cable labels & lengths' checked={opts.showCableLabels} onChange={(v) => setOpt('showCableLabels', v)} />
                   <Toggle label='Background image' checked={opts.showBackground} onChange={(v) => setOpt('showBackground', v)} />
                   <Toggle label='Grid' checked={opts.showGrid} onChange={(v) => setOpt('showGrid', v)} />
-                  <Toggle label='Key column' checked={opts.showLegend} onChange={(v) => setOpt('showLegend', v)} hint='Symbol key, cable key and scale bar' />
+                  <Toggle label='Key column' checked={opts.showLegend} onChange={(v) => setOpt('showLegend', v)} hint='Symbol key, notation, positions, totals and notes' />
                   <Toggle label='Colour by layer' checked={opts.colorByLayer} onChange={(v) => setOpt('colorByLayer', v)} />
                 </div>
               </>

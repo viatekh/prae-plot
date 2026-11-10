@@ -18,6 +18,7 @@ import type {
 } from '../types'
 import { DEFAULT_LAYERS, DEFAULT_VIEW_OPTIONS, SCHEMA_VERSION, isPowerCable } from '../types'
 import type { ViewOptions, DrawingMode } from '../types'
+import { resolvePositions } from '../lib/positions'
 
 const MAX_HISTORY = 50
 const VIEW_OPTIONS_KEY = 'prae-plot:view-options'
@@ -106,6 +107,11 @@ interface ProjectStore {
   // ── Actions: elements ─────────────────────────────────────
   addElement: (el: AnyElement) => void
   updateElement: (id: string, updates: Partial<AnyElement>) => void
+  /**
+   * Moves things bodily by (dx, dy): a truss or cable keeps its shape, and the
+   * fixtures hanging on a moved truss travel with it.
+   */
+  translate: (ids: string[], dx: number, dy: number) => void
   deleteSelected: () => void
 
   // ── Actions: fixtures ─────────────────────────────────────
@@ -423,6 +429,39 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
       project: {
         ...project,
         elements: project.elements.map((e) => (e.id === id ? ({ ...e, ...updates } as AnyElement) : e)),
+      },
+      isDirty: true,
+    })
+  },
+
+  translate: (ids, dx, dy) => {
+    const { project } = get()
+    if (!project || ids.length === 0 || (dx === 0 && dy === 0)) return
+    get().pushHistoryCoalesced(`translate:${ids.join(',')}`)
+    const moving = new Set(ids)
+    // Whatever hangs on a truss that is moving goes with it.
+    for (const position of resolvePositions(project).positions) {
+      if (moving.has(position.id)) for (const f of position.fixtures) moving.add(f.id)
+    }
+    const shift = <T extends { x?: number; y?: number }>(item: T): T =>
+      ({ ...item, x: (item.x ?? 0) + dx, y: (item.y ?? 0) + dy })
+    set({
+      project: {
+        ...project,
+        elements: project.elements.map((e) => {
+          if (!moving.has(e.id)) return e
+          if (e.type === 'truss') return { ...shift(e), x2: e.x2 + dx, y2: e.y2 + dy }
+          if (e.type === 'cable') {
+            return {
+              ...shift(e), x2: e.x2 + dx, y2: e.y2 + dy,
+              waypoints: (e.waypoints ?? []).map((w) => ({ x: w.x + dx, y: w.y + dy })),
+            }
+          }
+          return shift(e)
+        }),
+        fixtures: project.fixtures.map((f) => (moving.has(f.id) ? shift(f) : f)),
+        distros: project.distros.map((d) => (moving.has(d.id) && d.x !== undefined ? shift(d) : d)),
+        devices: project.devices.map((d) => (moving.has(d.id) && d.x !== undefined ? shift(d) : d)),
       },
       isDirty: true,
     })

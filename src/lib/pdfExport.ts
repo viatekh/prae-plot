@@ -3,11 +3,12 @@ import type { Project, CableElement, CableType } from '../types'
 import { CABLE_COLORS, CABLE_LABELS, isFreeform } from '../types'
 import { formatVersion, cableLength } from './utils'
 import {
-  DEFAULT_PLOT_OPTIONS, PAPER_LABELS, PEN, contentBounds, drawCaption, drawLegend, drawPlot,
-  drawText, paperDimensions, selectPlotContent,
+  DEFAULT_PLOT_OPTIONS, PAPER_LABELS, PEN, contentBounds, drawCaption, drawKey, drawPlot,
+  drawScaleBlock, drawText, paperDimensions, selectPlotContent,
 } from './plotVector'
 import type { PlotOptions } from './plotVector'
-import { formatCircuitRef, computeDistroLoad, computeCircuitLoad, circuitCapacityW } from '../store/projectStore'
+import { channelHookup, instrumentSchedule, patchByUniverse } from './schedules'
+import { computeDistroLoad, computeCircuitLoad, circuitCapacityW } from '../store/projectStore'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -137,16 +138,21 @@ function drawSheetFrame(pdf: jsPDF, W: number, H: number) {
   }
 }
 
-// ── Title block ───────────────────────────────────────────────────────────────
+// ── Title strip ───────────────────────────────────────────────────────────────
+// The title block runs down the right-hand edge with the key above it, the way
+// a lighting plot is traditionally laid out: the drawing gets the full height
+// of the sheet and everything you look up sits in one column, with the drawing
+// number in the bottom-right corner where a folded sheet shows it.
 
-const TITLE_BLOCK_H = 38 // mm, measured from the inner frame
+const TITLE_H = 75      // mm, without a logo
+const TITLE_LOGO_H = 13 // extra when the company logo is present
+const SCALE_BLOCK_H = 20
 
 interface TitleBlockData {
   subtitle: string
   scaleLabel: string
   paperLabel: string
   sheetRef: string
-  layerLabel?: string
   page: number
   pageCount: number
 }
@@ -156,8 +162,8 @@ function cell(
   pdf: jsPDF, x: number, y: number, w: number, caption: string, value: string,
   opts: { size?: number; color?: RGB; bold?: boolean } = {},
 ) {
-  drawCaption(pdf, caption, x + 2, y + 3.2, { size: 4.3 })
-  drawText(pdf, value || '—', x + 2, y + 3.2 + (opts.size ?? 8) * 0.48 + 1.4, {
+  drawCaption(pdf, caption, x + 2, y + 3.2, { size: 4.1 })
+  drawText(pdf, value || '—', x + 2, y + 3.2 + (opts.size ?? 8) * 0.4 + 1.3, {
     size: opts.size ?? 8,
     bold: opts.bold ?? true,
     color: opts.color ?? C.ink,
@@ -165,90 +171,71 @@ function cell(
   })
 }
 
-function drawTitleBlock(pdf: jsPDF, project: Project, W: number, H: number, d: TitleBlockData) {
-  const left = FRAME
-  const right = W - FRAME
-  const top = H - FRAME - TITLE_BLOCK_H
-  const bottom = H - FRAME
-  const width = right - left
+function titleBlockHeight(project: Project): number {
+  return TITLE_H + (project.info.companyLogo ? TITLE_LOGO_H : 0)
+}
 
-  // Block outline, heavier than the cell rules inside it
+function drawTitleBlock(pdf: jsPDF, project: Project, x: number, bottom: number, w: number, d: TitleBlockData) {
+  const top = bottom - titleBlockHeight(project)
+  const right = x + w
+  let y = top
+
   rgb(pdf, C.ink, 'draw')
   pdf.setLineWidth(PEN.frame)
-  pdf.line(left, top, right, top)
+  pdf.line(x, top, right, top)
 
-  const c1 = left + width * 0.42
-  const c2 = c1 + width * 0.30
-  pdf.line(c1, top, c1, bottom)
-  pdf.line(c2, top, c2, bottom)
+  /** A row of cells, ruled off underneath. `widths` are fractions of the strip. */
+  const row = (h: number, cells: [string, string, { size?: number; color?: RGB }?][], widths?: number[]) => {
+    let cx = x
+    cells.forEach(([caption, value, style], i) => {
+      const cw = w * (widths?.[i] ?? 1 / cells.length)
+      cell(pdf, cx, y, cw, caption, value, style)
+      if (i > 0) { rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(cx, y, cx, y + h) }
+      cx += cw
+    })
+    y += h
+    rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(x, y, right, y)
+  }
 
-  // ── Column 1: what this drawing is ─────────────────────────────────────────
-  let y = top
-  const c1w = c1 - left
-
-  // Company mark sits top-right of the identity column
   if (project.info.companyLogo) {
     try {
-      pdf.addImage(project.info.companyLogo, c1 - 27, top + 2, 25, 9, undefined, 'FAST')
+      const props = pdf.getImageProperties(project.info.companyLogo)
+      const fit = Math.min((w - 6) / props.width, (TITLE_LOGO_H - 4) / props.height)
+      pdf.addImage(project.info.companyLogo, x + 3, y + 2, props.width * fit, props.height * fit, undefined, 'FAST')
     } catch { /* unusable logo data — the block still prints */ }
+    y += TITLE_LOGO_H
+    rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(x, y, right, y)
   }
-  cell(pdf, left, y, project.info.companyLogo ? c1w - 29 : c1w, 'Project', project.info.name, { size: 11 })
-  y += 12
-  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(left, y, c1, y)
 
-  cell(pdf, left, y, c1w, 'Drawing', d.subtitle, { size: 8.5, color: C.blue })
-  y += 9.5
-  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair); pdf.line(left, y, c1, y)
+  row(13, [['Project', project.info.name, { size: 11 }]])
+  row(9.5, [['Drawing', d.subtitle, { size: 8.5, color: C.blue }]])
+  row(9, [['Venue', [project.info.venue, project.info.venueAddress].filter(Boolean).join(' — '), { size: 7 }]])
+  row(9, [
+    ['Client', project.info.clientName || project.info.companyName, { size: 7 }],
+    ['Drawn by', project.info.drawingAuthor, { size: 7 }],
+  ])
+  row(9, [
+    ['Lighting designer', project.info.lightingDesigner, { size: 7 }],
+    ['Technical director', project.info.technicalDirector, { size: 7 }],
+  ])
+  row(9, [
+    ['Scale', d.scaleLabel, { size: 8 }],
+    ['Paper', d.paperLabel, { size: 8 }],
+    ['Date', project.info.projectDate, { size: 7 }],
+  ], [0.3, 0.28, 0.42])
 
-  const venue = [project.info.venue, project.info.venueAddress].filter(Boolean).join(' — ')
-  cell(pdf, left, y, c1w * 0.62, 'Venue', venue, { size: 7.5 })
-  cell(pdf, left + c1w * 0.62, y, c1w * 0.38, 'Client', project.info.clientName ?? project.info.companyName, { size: 7.5 })
-
-  // ── Column 2: who is responsible ───────────────────────────────────────────
-  const c2w = c2 - c1
-  const half = c2w / 2
-  const fields: [string, string][] = [
-    ['Lighting designer', project.info.lightingDesigner],
-    ['Technical director', project.info.technicalDirector],
-    ['Drawn by', project.info.drawingAuthor],
-    ['Project date', project.info.projectDate],
-  ]
-  const rowH = TITLE_BLOCK_H / 2
-  fields.forEach(([caption, value], i) => {
-    const cx = c1 + (i % 2) * half
-    const cy = top + Math.floor(i / 2) * rowH
-    cell(pdf, cx, cy, half, caption, value, { size: 8 })
-  })
+  // The drawing number sits in the corner, largest thing in the block.
+  const noW = w * 0.46
+  cell(pdf, x, y, noW, 'Drawing no.', d.sheetRef, { size: 13 })
+  cell(pdf, x + noW, y, w * 0.27, 'Rev', formatVersion(project.version), { size: 9 })
+  cell(pdf, x + noW + w * 0.27, y, w * 0.27, 'Sheet', `${d.page} / ${d.pageCount}`, { size: 9 })
   rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair)
-  pdf.line(c1, top + rowH, c2, top + rowH)
-  pdf.line(c1 + half, top, c1 + half, bottom)
+  pdf.line(x + noW, y, x + noW, y + 13)
+  pdf.line(x + noW + w * 0.27, y, x + noW + w * 0.27, y + 13)
+  y += 13
+  pdf.line(x, y, right, y)
 
-  // ── Column 3: sheet data ───────────────────────────────────────────────────
-  const c3w = right - c2
-  const c3half = c3w / 2
-  const r3 = TITLE_BLOCK_H / 3
-  const sheetFields: [string, string, number][] = [
-    ['Scale', d.scaleLabel, 10],
-    ['Paper', d.paperLabel, 10],
-    ['Drawing no.', d.sheetRef, 9],
-    ['Revision', formatVersion(project.version), 9],
-    ['Sheet', d.pageCount > 1 ? `${d.page} of ${d.pageCount}` : '1 of 1', 8],
-    ['Layers', d.layerLabel ?? 'All', 7],
-  ]
-  sheetFields.forEach(([caption, value, size], i) => {
-    const cx = c2 + (i % 2) * c3half
-    const cy = top + Math.floor(i / 2) * r3
-    cell(pdf, cx, cy, c3half, caption, value, { size })
-  })
-  rgb(pdf, C.faint, 'draw'); pdf.setLineWidth(PEN.hair)
-  pdf.line(c2, top + r3, right, top + r3)
-  pdf.line(c2, top + r3 * 2, right, top + r3 * 2)
-  pdf.line(c2 + c3half, top, c2 + c3half, bottom)
-
-  // Issue stamp along the bottom of the identity column
-  drawText(pdf, `Issued ${new Date().toLocaleString()} · Prae Plot`, left + 2, bottom - 1.6, {
-    size: 4.2, color: C.light,
-  })
+  drawText(pdf, `Issued ${new Date().toLocaleDateString()} · Prae Plot`, x + 2, bottom - 1.2, { size: 3.8, color: C.light })
 }
 
 // ── Report scaffolding ────────────────────────────────────────────────────────
@@ -484,44 +471,45 @@ export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): Bui
 
     drawSheetFrame(pdf, W, H)
 
-    const legendW = opts.showLegend ? Math.min(62, Math.max(44, W * 0.16)) : 0
-    const area = {
-      x: FRAME + 4,
-      y: FRAME + 4,
-      w: W - FRAME * 2 - 8,
-      h: H - FRAME - TITLE_BLOCK_H - FRAME - 8,
-    }
-    const drawing = { ...area, w: area.w - (legendW ? legendW + 6 : 0) }
+    // Right-hand strip: key at the top, scale under it, title block at the foot.
+    const stripW = Math.min(80, Math.max(58, W * 0.17))
+    const stripX = W - FRAME - stripW
+    const pad = 3.5
+    const titleTop = H - FRAME - titleBlockHeight(project)
+    const scaleTop = titleTop - SCALE_BLOCK_H
 
+    rgb(pdf, C.ink, 'draw')
+    line(pdf, stripX, FRAME, stripX, H - FRAME, PEN.frame)
+
+    const drawing = { x: FRAME + 1.5, y: FRAME + 1.5, w: stripX - FRAME - 3, h: H - FRAME * 2 - 3 }
     const content = selectPlotContent(project, page.layerIds, opts.showBackground)
     const result = drawPlot(pdf, project, content, drawing, opts, req.gridSize ?? 1, sharedBounds)
 
-    if (legendW) {
-      // Rule between the drawing and the key column
-      rgb(pdf, C.faint, 'draw')
-      line(pdf, area.x + drawing.w + 3, area.y, area.x + drawing.w + 3, area.y + area.h, PEN.hair)
-      drawLegend(pdf, { x: area.x + drawing.w + 6, y: area.y, w: legendW, h: area.h }, content, result, opts.paper)
+    if (opts.showLegend) {
+      drawKey(pdf, { x: stripX + pad, y: FRAME, w: stripW - pad * 2, h: scaleTop - FRAME - 2 }, project, content, result, opts)
     }
+    rgb(pdf, C.faint, 'draw')
+    line(pdf, stripX, scaleTop, W - FRAME, scaleTop, PEN.hair)
+    drawScaleBlock(pdf, { x: stripX + pad, y: scaleTop, w: stripW - pad * 2, h: SCALE_BLOCK_H }, result, opts.paper)
 
     if (result.scale.overflow) {
       rgb(pdf, C.amber, 'draw')
       rgb(pdf, C.white, 'fill')
       pdf.setLineWidth(PEN.archLight)
-      pdf.rect(drawing.x, drawing.y, 64, 6, 'FD')
-      drawText(pdf, 'DRAWING CLIPPED AT THIS SCALE', drawing.x + 2.5, drawing.y + 4, {
+      pdf.rect(drawing.x + 2, drawing.y + 2, 64, 6, 'FD')
+      drawText(pdf, 'DRAWING CLIPPED AT THIS SCALE', drawing.x + 4.5, drawing.y + 6, {
         size: 5.5, bold: true, spacing: 0.25, color: C.amber,
       })
     }
 
     const layerLabel = page.label
-      ?? (page.layerIds ? page.layerIds.map(layerName).join(', ') : 'All layers')
+      ?? (page.layerIds && page.layerIds.length < project.layers.length ? page.layerIds.map(layerName).join(', ') : '')
 
-    drawTitleBlock(pdf, project, W, H, {
-      subtitle: page.label ? `Lighting Plot — ${page.label}` : 'Lighting Plot',
-      scaleLabel: result.scale.notToScale ? 'NTS' : `1:${result.scale.denominator}${result.scale.standard ? '' : '*'}`,
+    drawTitleBlock(pdf, project, stripX, H - FRAME, stripW, {
+      subtitle: layerLabel ? `Lighting Plot — ${layerLabel}` : 'Lighting Plot',
+      scaleLabel: result.scale.notToScale ? 'NTS' : `1:${result.scale.denominator}`,
       paperLabel: `${PAPER_LABELS[opts.paper]} ${opts.orientation === 'landscape' ? 'L' : 'P'}`,
       sheetRef: `LX-${String(i + 1).padStart(2, '0')}`,
-      layerLabel,
       page: i + 1,
       pageCount: pages.length,
     })
@@ -531,62 +519,176 @@ export function buildPlotPDF(project: Project, req: PlotExportRequest = {}): Bui
   return { doc: pdf, filename: filenameFor(project, suffix) }
 }
 
-// ── Patch PDF ─────────────────────────────────────────────────────────────────
+// ── Patch, hookup and instrument schedule ─────────────────────────────────────
 
+function wattsLabel(w: number): string {
+  return w >= 1000 ? `${(w / 1000).toFixed(1)} kW` : `${Math.round(w)} W`
+}
+
+/** Closing totals line set between two rules. */
+function totalsLine(r: Report, totalW: number, text: string) {
+  ensureSpace(r, 10)
+  tableRule(r.pdf, MARGIN, r.y, totalW, true)
+  r.y += 4.2
+  drawCaption(r.pdf, 'Total', MARGIN + 1.5, r.y, { size: 4.6, color: C.ink })
+  drawText(r.pdf, text, MARGIN + totalW - 1.5, r.y, { size: 7, bold: true, align: 'right' })
+  r.y += 1.6
+  tableRule(r.pdf, MARGIN, r.y, totalW, true)
+  r.y += 6
+}
+
+function rigTotals(project: Project): string {
+  const kw = project.fixtures.reduce((s, f) => s + f.powerRating, 0) / 1000
+  const kg = project.fixtures.reduce((s, f) => s + f.weight, 0)
+  return `${project.fixtures.length} fixtures    ${kw.toFixed(1)} kW    ${kg.toFixed(1)} kg`
+}
+
+/** The patch in address order, one block per universe. */
 export function buildPatchPDF(project: Project): BuiltPdf {
   const r = startReport(project, 'Patch Sheet', 'PATCH')
   const { pdf, W } = r
   const totalW = W - MARGIN * 2
 
   const cols: Col[] = [
-    { label: 'CH', w: 10 },
-    { label: 'CIRCUIT', w: 30 },
+    { label: 'ADDRESS', w: 18 },
+    { label: 'RANGE', w: 20 },
+    { label: 'CHAN', w: 12, align: 'right' },
     { label: 'FIXTURE', w: 0 },
-    { label: 'PATCH', w: 20 },
-    { label: 'MODE', w: 24 },
-    { label: 'CH CNT', w: 14, align: 'right' },
-    { label: 'COLOUR', w: 18 },
-    { label: 'NOTES', w: 30 },
+    { label: 'MODE', w: 26 },
+    { label: 'FOOTPRINT', w: 18, align: 'right' },
+    { label: 'POSITION', w: 24 },
+    { label: 'UNIT', w: 10, align: 'right' },
   ]
-  fillColumn(cols, 2, totalW)
+  fillColumn(cols, 3, totalW)
 
-  const fixtures = [...project.fixtures].sort((a, b) => a.channel - b.channel)
-  if (fixtures.length === 0) {
+  const universes = patchByUniverse(project)
+  if (universes.length === 0) {
     emptyNote(r, 'No fixtures placed yet.')
     return finishReport(r, 'Patch')
   }
 
+  for (const u of universes) {
+    ensureSpace(r, 22)
+    const clashes = u.rows.filter((row) => row.clash).length
+    sectionHeading(r, `Universe ${u.universe}`,
+      `${u.used} of 512 addresses used  ·  ${512 - u.used} free${clashes ? `  ·  ${clashes} in conflict` : ''}`)
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW)
+    u.rows.forEach((row, idx) => {
+      ensureSpace(r, ROW_H)
+      const y = r.y
+      r.y = tableRow(pdf, MARGIN, y, [
+        row.patch,
+        row.footprint > 1 ? `${row.address}–${row.endAddress}` : String(row.address),
+        String(row.channel || '—'),
+        row.type,
+        row.mode,
+        String(row.footprint),
+        row.position || '—',
+        row.unit ? String(row.unit) : '—',
+      ], cols, idx % 2 === 0, totalW)
+      if (row.clash) {
+        rgb(pdf, C.red, 'fill')
+        pdf.rect(MARGIN, y, 0.9, ROW_H, 'F')
+        drawText(pdf, 'CLASH', MARGIN + cols[0].w + cols[1].w - 1.5, y + 3.8, { size: 4.6, bold: true, color: C.red, align: 'right', spacing: 0.2 })
+      }
+    })
+    tableRule(pdf, MARGIN, r.y, totalW)
+    r.y += 7
+    r.repeatHeader = undefined
+  }
+
+  totalsLine(r, totalW, rigTotals(project))
+  return finishReport(r, 'Patch')
+}
+
+/** Channel hookup — the rig in the order the desk sees it. */
+export function buildHookupPDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Channel Hookup', 'HOOKUP')
+  const { pdf, W } = r
+  const totalW = W - MARGIN * 2
+
+  const cols: Col[] = [
+    { label: 'CHAN', w: 12, align: 'right' },
+    { label: 'ADDRESS', w: 18 },
+    { label: 'POSITION', w: 24 },
+    { label: 'UNIT', w: 10, align: 'right' },
+    { label: 'INSTRUMENT', w: 0 },
+    { label: 'PURPOSE', w: 34 },
+    { label: 'COLOUR', w: 16 },
+    { label: 'CIRCUIT', w: 24 },
+  ]
+  fillColumn(cols, 4, totalW)
+
+  const rows = channelHookup(project)
+  if (rows.length === 0) {
+    emptyNote(r, 'No fixtures placed yet.')
+    return finishReport(r, 'Hookup')
+  }
+
   r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW) }
   r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW)
-
-  fixtures.forEach((f, idx) => {
+  rows.forEach((row, idx) => {
     ensureSpace(r, ROW_H)
-    r.y = tableRow(pdf, MARGIN, r.y, [
-      String(f.channel || '—'),
-      formatCircuitRef(project.distros, f.circuitId),
-      `${f.manufacturer} ${f.model}`,
-      `${f.universe}.${String(f.address).padStart(3, '0')}`,
-      f.mode,
-      String(f.channelCount || '—'),
-      f.color || '—',
-      f.notes || '',
+    const y = r.y
+    r.y = tableRow(pdf, MARGIN, y, [
+      '', row.patch, row.position || '—', row.unit ? String(row.unit) : '—',
+      row.type, row.purpose, row.colour, row.circuit === '—' ? '' : row.circuit,
     ], cols, idx % 2 === 0, totalW)
+    // The channel is what this sheet is looked up by, so it carries the weight.
+    drawText(pdf, row.channel ? `(${row.channel})` : '—', MARGIN + cols[0].w - 1.5, y + 3.9, { size: 7.6, bold: true, align: 'right' })
   })
 
-  ensureSpace(r, 10)
-  tableRule(pdf, MARGIN, r.y, totalW, true)
-  r.y += 4.2
-  const kw = fixtures.reduce((s, f) => s + f.powerRating, 0) / 1000
-  const kg = fixtures.reduce((s, f) => s + f.weight, 0)
-  drawCaption(pdf, 'Total', MARGIN + 1.5, r.y, { size: 4.6, color: C.ink })
-  drawText(pdf, `${fixtures.length} fixtures    ${kw.toFixed(1)} kW    ${kg.toFixed(1)} kg`, MARGIN + totalW - 1.5, r.y, {
-    size: 7, bold: true, align: 'right',
-  })
-  r.y += 1.6
-  tableRule(pdf, MARGIN, r.y, totalW, true)
-  r.y += 6
+  totalsLine(r, totalW, rigTotals(project))
+  return finishReport(r, 'Hookup')
+}
 
-  return finishReport(r, 'Patch')
+/** Instrument schedule — the rig in the order it is hung. */
+export function buildInstrumentPDF(project: Project): BuiltPdf {
+  const r = startReport(project, 'Instrument Schedule', 'INSTR')
+  const { pdf, W } = r
+  const totalW = W - MARGIN * 2
+
+  const cols: Col[] = [
+    { label: 'UNIT', w: 11, align: 'right' },
+    { label: 'INSTRUMENT', w: 0 },
+    { label: 'LOAD', w: 16, align: 'right' },
+    { label: 'PURPOSE', w: 34 },
+    { label: 'COLOUR', w: 16 },
+    { label: 'CHAN', w: 13, align: 'right' },
+    { label: 'ADDRESS', w: 18 },
+    { label: 'CIRCUIT', w: 24 },
+  ]
+  fillColumn(cols, 1, totalW)
+
+  const groups = instrumentSchedule(project)
+  if (groups.length === 0) {
+    emptyNote(r, 'No fixtures placed yet.')
+    return finishReport(r, 'Instrument_Schedule')
+  }
+
+  for (const g of groups) {
+    ensureSpace(r, 22)
+    sectionHeading(r, g.trim != null ? `${g.name}   ·   trim ${g.trim.toFixed(2)} m` : g.name,
+      `${g.rows.length} unit${g.rows.length !== 1 ? 's' : ''}  ·  ${wattsLabel(g.watts)}  ·  ${g.weight.toFixed(1)} kg`)
+    r.repeatHeader = () => { r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW) }
+    r.y = tableHeader(pdf, MARGIN, r.y, cols, totalW)
+    g.rows.forEach((row, idx) => {
+      ensureSpace(r, ROW_H)
+      const y = r.y
+      r.y = tableRow(pdf, MARGIN, y, [
+        '', row.type, wattsLabel(row.watts), row.purpose, row.colour,
+        row.channel ? `(${row.channel})` : '—', row.patch, row.circuit === '—' ? '' : row.circuit,
+      ], cols, idx % 2 === 0, totalW)
+      drawText(pdf, row.unit ? String(row.unit) : '—', MARGIN + cols[0].w - 1.5, y + 3.9, { size: 7.6, bold: true, align: 'right' })
+    })
+    tableRule(pdf, MARGIN, r.y, totalW)
+    r.y += 7
+    r.repeatHeader = undefined
+  }
+
+  totalsLine(r, totalW, rigTotals(project))
+  return finishReport(r, 'Instrument_Schedule')
 }
 
 // ── Equipment PDF ─────────────────────────────────────────────────────────────
@@ -1065,6 +1167,8 @@ export function buildGroupsPDF(project: Project): BuiltPdf {
 
 export function exportPlotPDF(project: Project, req?: PlotExportRequest) { savePdf(buildPlotPDF(project, req)) }
 export function exportPatchPDF(project: Project) { savePdf(buildPatchPDF(project)) }
+export function exportHookupPDF(project: Project) { savePdf(buildHookupPDF(project)) }
+export function exportInstrumentPDF(project: Project) { savePdf(buildInstrumentPDF(project)) }
 export function exportEquipmentPDF(project: Project) { savePdf(buildEquipmentPDF(project)) }
 export function exportCablePDF(project: Project) { savePdf(buildCablePDF(project)) }
 export function exportPowerPDF(project: Project) { savePdf(buildPowerPDF(project)) }

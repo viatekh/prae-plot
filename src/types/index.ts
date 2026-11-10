@@ -139,6 +139,10 @@ export interface TrussElement extends BaseElement {
   type: 'truss'
   x2: number
   y2: number
+  /** Trim height above the deck, in metres. Printed on the position tag. */
+  trim?: number
+  /** Unit numbers count from the far end rather than the left/top end. */
+  numberFromEnd?: boolean
 }
 
 export interface TextElement extends BaseElement {
@@ -198,6 +202,8 @@ export interface PlacedFixture {
   label: string        // custom annotation shown below symbol
   notes: string
   color: string        // gel / colour
+  /** What the light is for — "Front wash", "DS special". Printed on the plot. */
+  purpose?: string
   dimmerNumber: string
   layerId?: string
 }
@@ -279,6 +285,8 @@ export interface ProjectInfo {
   companyLogo?: string
   clientName?: string
   clientLogo?: string
+  /** General notes printed in the key column of the plot, one per line. */
+  notes?: string
 }
 
 /** Bumped when the stored shape of a project changes; see normaliseProject. */
@@ -329,12 +337,17 @@ export interface ViewOptions {
   // Canvas
   grid: boolean
   snap: boolean
+  /** Fixtures dropped near a truss jump onto it. */
+  snapToTruss: boolean
   gridSize: number
   scaleBar: boolean
   origin: boolean
   // Fixtures
   channels: boolean
   addresses: boolean
+  unitNumbers: boolean
+  colours: boolean
+  purposes: boolean
   fixtureLabels: boolean
   circuitRefs: boolean
   universeColors: boolean
@@ -352,11 +365,15 @@ export interface ViewOptions {
 export const DEFAULT_VIEW_OPTIONS: ViewOptions = {
   grid: true,
   snap: true,
+  snapToTruss: true,
   gridSize: 1,
   scaleBar: true,
   origin: true,
   channels: true,
   addresses: true,
+  unitNumbers: true,
+  colours: true,
+  purposes: true,
   fixtureLabels: true,
   circuitRefs: false,
   universeColors: false,

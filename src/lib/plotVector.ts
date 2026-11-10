@@ -16,10 +16,12 @@ import type {
   CableType, FixtureSymbolType,
 } from '../types'
 import { CABLE_COLORS, CABLE_LABELS } from '../types'
-import { symbolShapes, symbolLineWidth, symbolExtent } from './symbolGeometry'
+import { symbolShapes, symbolLineWidth, symbolExtent, symbolBox } from './symbolGeometry'
 import type { FillRole } from './symbolGeometry'
 import { symbolColors, SYMBOL_RADIUS_M } from './symbols'
 import { cableLength } from './utils'
+import { resolvePositions } from './positions'
+import type { ResolvedPositions } from './positions'
 
 // ── Paper ─────────────────────────────────────────────────────────────────────
 
@@ -60,6 +62,9 @@ export interface PlotOptions {
   showBackground: boolean
   showChannels: boolean
   showAddresses: boolean
+  showUnitNumbers: boolean
+  showColours: boolean
+  showPurposes: boolean
   showFixtureLabels: boolean
   showCableLabels: boolean
   showLegend: boolean
@@ -79,6 +84,9 @@ export const DEFAULT_PLOT_OPTIONS: PlotOptions = {
   showBackground: true,
   showChannels: true,
   showAddresses: true,
+  showUnitNumbers: true,
+  showColours: true,
+  showPurposes: true,
   showFixtureLabels: true,
   showCableLabels: true,
   showLegend: true,
@@ -287,6 +295,7 @@ export interface TextStyle {
   size?: number
   color?: RGB
   bold?: boolean
+  italic?: boolean
   /** Letter spacing in mm — drawing captions are traditionally tracked out. */
   spacing?: number
   align?: 'left' | 'center' | 'right'
@@ -301,7 +310,7 @@ const PT = 0.3527
 export function drawText(pdf: jsPDF, text: string, x: number, y: number, style: TextStyle = {}) {
   if (!text) return
   const size = style.size ?? 5
-  pdf.setFont('helvetica', style.bold ? 'bold' : 'normal')
+  pdf.setFont('helvetica', style.bold ? 'bold' : style.italic ? 'italic' : 'normal')
   pdf.setFontSize(size)
   if (style.spacing) pdf.setCharSpace(style.spacing)
 
@@ -450,6 +459,7 @@ export interface PlotRenderResult {
   cableTypes: CableType[]
   /** Totals for the instrument summary. */
   totals: { count: number; watts: number; weight: number }
+  positions: ResolvedPositions
 }
 
 /** 630 W / 6.3 kW — schedules read better when the unit follows the magnitude. */
@@ -479,6 +489,38 @@ function cableTypesIn(content: PlotContent): CableType[] {
   return [...set]
 }
 
+/** Annotation grows with the sheet: a bigger drawing is read from further away. */
+const ANNOTATION_SCALE: Record<PaperSize, number> = { a4: 0.92, a3: 1, a2: 1.2, a1: 1.45 }
+
+// ── Label placement ───────────────────────────────────────────────────────────
+// Labels are placed after the line work, trying a few sensible spots and taking
+// the first one that does not sit on a fixture, a truss or another label.
+
+interface Box { l: number; t: number; r: number; b: number }
+
+const overlaps = (a: Box, b: Box) => a.l < b.r && a.r > b.l && a.t < b.b && a.b > b.t
+const inside = (a: Box, f: Rect) => a.l >= f.x && a.r <= f.x + f.w && a.t >= f.y && a.b <= f.y + f.h
+
+function pickSpot<T extends { box: Box }>(candidates: T[], obstacles: Box[], frame: Rect): T {
+  const visible = candidates.filter((c) => inside(c.box, frame))
+  return visible.find((c) => !obstacles.some((o) => overlaps(c.box, o))) ?? visible[0] ?? candidates[0]
+}
+
+/** Where a fixture's symbol and annotation fall on paper. */
+interface FixtureLayout {
+  cx: number
+  cy: number
+  rMm: number
+  /** Symbol bounding box on paper, after rotation. */
+  sym: Box
+}
+
+function fixtureLayout(f: PlacedFixture, t: Transform, rMm: number): FixtureLayout {
+  const cx = t.x(f.x), cy = t.y(f.y)
+  const b = symbolBox(f.symbol, f.rotation)
+  return { cx, cy, rMm, sym: { l: cx + b.minX * rMm, t: cy + b.minY * rMm, r: cx + b.maxX * rMm, b: cy + b.maxY * rMm } }
+}
+
 /**
  * Draws the plot into `frame` (mm). Returns the scale actually used so the
  * caller can print it in the title block.
@@ -499,7 +541,10 @@ export function drawPlot(
     (acc, i) => ({ count: acc.count + i.count, watts: acc.watts + i.watts, weight: acc.weight + i.weight }),
     { count: 0, watts: 0, weight: 0 },
   )
-  const base = { legendItems, cableTypes: cableTypesIn(content), totals }
+  // Unit numbers come from the whole rig, so a sheet showing only some layers
+  // still numbers a fixture the way every other sheet does.
+  const positions = resolvePositions(project)
+  const base = { legendItems, cableTypes: cableTypesIn(content), totals, positions }
 
   if (!bounds) {
     drawText(pdf, 'Nothing to draw on the selected layers.', frame.x + frame.w / 2, frame.y + frame.h / 2, {
@@ -508,16 +553,36 @@ export function drawPlot(
     return { ...base, scale: { mmPerM: 20, denominator: 50, standard: true, overflow: false }, bounds: null }
   }
 
-  const scale = chooseScale(bounds, frame.w, frame.h, opts.freeform ? 'fit' : opts.scale)
+  // The drawing is fitted inside a small margin so the annotation around the
+  // outermost fixtures has somewhere to go; the clip stays at the full frame.
+  const fit = { x: frame.x + 6, y: frame.y + 7, w: frame.w - 12, h: frame.h - 16 }
+  const scale = chooseScale(bounds, fit.w, fit.h, opts.freeform ? 'fit' : opts.scale)
   if (opts.freeform) scale.notToScale = true
-  const t = makeTransform(bounds, frame, scale.mmPerM)
+  const t = makeTransform(bounds, fit, scale.mmPerM)
+  const k = ANNOTATION_SCALE[opts.paper]
+
+  // Symbols are drawn near true size but never so small they stop reading.
+  const rMm = Math.max(1.6, Math.min(4.5 * k, SYMBOL_RADIUS_M * t.mmPerM))
+  const layouts = new Map(content.fixtures.map((f) => [f.id, fixtureLayout(f, t, rMm)]))
 
   clipped(pdf, frame, () => {
     if (opts.showBackground && content.background) drawBackground(pdf, content.background, t)
     if (opts.showGrid) drawGrid(pdf, bounds, t, gridSize)
     drawElements(pdf, content, project, t, opts)
     drawDistrosAndDevices(pdf, content, t)
-    drawFixtures(pdf, content.fixtures, project, t, opts)
+    drawFixtureSymbols(pdf, content.fixtures, project, layouts, opts)
+    drawElementLabels(pdf, content, project, t, opts, layouts, frame, k)
+    for (const f of content.fixtures) {
+      const pos = positions.byFixture.get(f.id)
+      drawFixtureAnnotation(pdf, layouts.get(f.id)!, {
+        channel: f.channel > 0 ? String(f.channel) : '',
+        unit: pos && pos.unit > 0 ? String(pos.unit) : '',
+        address: `${f.universe}.${String(f.address).padStart(3, '0')}`,
+        colour: f.color ?? '',
+        purpose: f.purpose ?? '',
+        label: f.label ?? '',
+      }, opts, k)
+    }
   })
 
   return { ...base, scale, bounds }
@@ -576,6 +641,21 @@ function elementStroke(el: AnyElement, project: Project, colorByLayer: boolean):
   return hexToRgb(el.stroke || '#374151')
 }
 
+/** Paper-space corners of a rectangle element, allowing for its rotation. */
+function rectCorners(r: RectElement, t: Transform): number[] {
+  const rad = (r.rotation * Math.PI) / 180
+  const cos = Math.cos(rad), sin = Math.sin(rad)
+  return ([[0, 0], [r.width, 0], [r.width, r.height], [0, r.height]] as const)
+    .flatMap(([dx, dy]) => [t.x(r.x + dx * cos - dy * sin), t.y(r.y + dx * sin + dy * cos)])
+}
+
+function polygonPoints(p: PolygonElement, t: Transform): number[] {
+  const pts: number[] = []
+  for (let i = 0; i < p.points.length; i += 2) pts.push(t.x(p.x + p.points[i]), t.y(p.y + p.points[i + 1]))
+  return pts
+}
+
+/** Line work only. Names go on afterwards — see drawElementLabels. */
 function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Transform, opts: PlotOptions) {
   for (const el of content.elements) {
     const stroke = elementStroke(el, project, opts.colorByLayer)
@@ -586,38 +666,20 @@ function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Tra
     const lw = el.strokeWidth >= 2 ? PEN.archHeavy : PEN.archMed
 
     if (el.type === 'rect') {
-      const r = el as RectElement
-      const rad = (r.rotation * Math.PI) / 180
-      const cos = Math.cos(rad), sin = Math.sin(rad)
-      const pts = ([[0, 0], [r.width, 0], [r.width, r.height], [0, r.height]] as const)
-        .flatMap(([dx, dy]) => [
-          t.x(r.x + dx * cos - dy * sin),
-          t.y(r.y + dx * sin + dy * cos),
-        ])
       if (fill) setFill(pdf, fill)
       setDraw(pdf, stroke, lw)
-      polyline(pdf, pts, fill ? 'FD' : 'S', true)
-      if (r.label) centreLabel(pdf, r.label, t.x(r.x + r.width / 2), t.y(r.y + r.height / 2))
+      polyline(pdf, rectCorners(el as RectElement, t), fill ? 'FD' : 'S', true)
     } else if (el.type === 'ellipse') {
       const e = el as EllipseElement
       if (fill) setFill(pdf, fill)
       setDraw(pdf, stroke, lw)
       pdf.ellipse(t.x(e.x), t.y(e.y), e.radiusX * t.mmPerM, e.radiusY * t.mmPerM, fill ? 'FD' : 'S')
-      if (e.label) centreLabel(pdf, e.label, t.x(e.x), t.y(e.y))
     } else if (el.type === 'polygon') {
-      const p = el as PolygonElement
-      const pts: number[] = []
-      for (let i = 0; i < p.points.length; i += 2) pts.push(t.x(p.x + p.points[i]), t.y(p.y + p.points[i + 1]))
       if (fill) setFill(pdf, fill)
       setDraw(pdf, stroke, lw)
-      polyline(pdf, pts, fill ? 'FD' : 'S', true)
-      if (p.label && pts.length >= 4) {
-        const xs = pts.filter((_, i) => i % 2 === 0)
-        const ys = pts.filter((_, i) => i % 2 === 1)
-        centreLabel(pdf, p.label, (Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2)
-      }
+      polyline(pdf, polygonPoints(el as PolygonElement, t), fill ? 'FD' : 'S', true)
     } else if (el.type === 'truss') {
-      drawTruss(pdf, el as TrussElement, stroke, t, opts.freeform)
+      drawTruss(pdf, el as TrussElement, stroke, t)
     } else if (el.type === 'cable') {
       drawCable(pdf, el as CableElement, t, opts)
     } else if (el.type === 'text') {
@@ -633,26 +695,24 @@ function drawElements(pdf: jsPDF, content: PlotContent, project: Project, t: Tra
   }
 }
 
-function centreLabel(pdf: jsPDF, label: string, x: number, y: number) {
-  drawText(pdf, label.toUpperCase(), x, y, {
-    size: 5, color: [90, 99, 112], spacing: 0.4, align: 'center', backdrop: true,
-  })
+/** Half-width on paper of a truss drawn at this scale. */
+function trussHalf(t: Transform): number {
+  // A 0.3 m truss, but never thinner than a readable pair of lines.
+  return Math.max(0.55, Math.min(3, 0.15 * t.mmPerM))
 }
 
 /**
  * Hanging positions print as real truss: two chords with diagonal bracing and
- * end plates, plus a name tag. A single fat line reads as a wall, not a bar.
+ * end plates. A single fat line reads as a wall, not a bar.
  */
-function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform, freeform: boolean) {
+function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform) {
   const x1 = t.x(te.x), y1 = t.y(te.y), x2 = t.x(te.x2), y2 = t.y(te.y2)
-  const lengthM = Math.hypot(te.x2 - te.x, te.y2 - te.y)
   const lengthMm = Math.hypot(x2 - x1, y2 - y1)
   if (lengthMm < 0.5) return
 
   const ux = (x2 - x1) / lengthMm, uy = (y2 - y1) / lengthMm
   const nx = -uy, ny = ux
-  // A 0.3 m truss, but never thinner than a readable pair of lines.
-  const half = Math.max(0.55, Math.min(3, 0.15 * t.mmPerM))
+  const half = trussHalf(t)
 
   setDraw(pdf, stroke, PEN.archHeavy)
   pdf.line(x1 + nx * half, y1 + ny * half, x2 + nx * half, y2 + ny * half)
@@ -677,20 +737,126 @@ function drawTruss(pdf: jsPDF, te: TrussElement, stroke: RGB, t: Transform, free
       up = !up
     }
   }
+}
 
-  // Position tag, set off the truss on the near side
-  const label = te.label || 'TRUSS'
-  const cx = (x1 + x2) / 2 - nx * (half + 3.2)
-  const cy = (y1 + y2) / 2 - ny * (half + 3.2)
-  pdf.setFont('helvetica', 'bold'); pdf.setFontSize(5)
-  const tagW = pdf.getTextWidth(label.toUpperCase()) + 0.35 * label.length + 4
-  setFill(pdf, PAPER_WHITE)
-  setDraw(pdf, stroke, PEN.hair)
-  pdf.rect(cx - tagW / 2, cy - 2.2, tagW, 4.4, 'FD')
-  drawText(pdf, label.toUpperCase(), cx, cy + 0.9, { size: 5, bold: true, spacing: 0.35, align: 'center', color: stroke })
-  if (!freeform) {
-    drawText(pdf, `${lengthM.toFixed(2)} m`, cx, cy - 3.4, {
-      size: 4.2, color: MUTED, align: 'center', spacing: 0.1,
+/** Everything a label has to keep clear of. */
+function annotationObstacles(layouts: Map<string, FixtureLayout>, content: PlotContent, t: Transform, k: number): Box[] {
+  const out: Box[] = []
+  for (const l of layouts.values()) {
+    out.push({ l: Math.min(l.sym.l, l.cx - 3 * k) - 3 * k, r: Math.max(l.sym.r, l.cx + 3 * k), t: l.sym.t - 5.4 * k, b: l.sym.b + 7 * k })
+  }
+  const half = trussHalf(t) + 0.4
+  for (const el of content.elements) {
+    if (el.type !== 'truss') continue
+    const x1 = t.x(el.x), y1 = t.y(el.y), x2 = t.x(el.x2), y2 = t.y(el.y2)
+    const steps = Math.max(1, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / (half * 2)))
+    for (let i = 0; i <= steps; i++) {
+      const x = x1 + ((x2 - x1) * i) / steps, y = y1 + ((y2 - y1) * i) / steps
+      out.push({ l: x - half, r: x + half, t: y - half, b: y + half })
+    }
+  }
+  for (const d of content.distros) out.push({ l: t.x(d.x ?? 0) - 14, r: t.x(d.x ?? 0) + 14, t: t.y(d.y ?? 0) - 7, b: t.y(d.y ?? 0) + 7 })
+  for (const d of content.devices) out.push({ l: t.x(d.x ?? 0) - 13, r: t.x(d.x ?? 0) + 13, t: t.y(d.y ?? 0) - 6, b: t.y(d.y ?? 0) + 6 })
+  return out
+}
+
+/** Names of shapes and positions, each put where it will not sit on a light. */
+function drawElementLabels(
+  pdf: jsPDF, content: PlotContent, project: Project, t: Transform, opts: PlotOptions,
+  layouts: Map<string, FixtureLayout>, frame: Rect, k: number,
+) {
+  const obstacles = annotationObstacles(layouts, content, t, k)
+  const size = 5 * k
+  const h = size * PT
+
+  const textWidth = (text: string, spacing: number, bold = false) => {
+    pdf.setFont('helvetica', bold ? 'bold' : 'normal'); pdf.setFontSize(size)
+    return pdf.getTextWidth(text) + spacing * text.length
+  }
+
+  // ── Position tags first: they are the labels people look for ──────────────
+  let positionIndex = 0
+  for (const el of content.elements) {
+    if (el.type !== 'truss') continue
+    const te = el as TrussElement
+    const index = positionIndex++
+    const x1 = t.x(te.x), y1 = t.y(te.y), x2 = t.x(te.x2), y2 = t.y(te.y2)
+    const lengthMm = Math.hypot(x2 - x1, y2 - y1)
+    if (lengthMm < 0.5) continue
+    const ux = (x2 - x1) / lengthMm, uy = (y2 - y1) / lengthMm
+    const nx = -uy, ny = ux
+    const half = trussHalf(t)
+    const stroke = elementStroke(te, project, opts.colorByLayer)
+
+    const name = (te.label?.trim() || `Position ${index + 1}`).toUpperCase()
+    const facts = [
+      !opts.freeform && `${Math.hypot(te.x2 - te.x, te.y2 - te.y).toFixed(2)} m`,
+      te.trim != null && `TRIM ${te.trim.toFixed(2)} m`,
+    ].filter(Boolean).join('  ·  ')
+    const tagW = textWidth(name, 0.35 * k, true) + 4 * k
+    const tagH = 4.4 * k
+    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4.2 * k)
+    const factsW = facts ? pdf.getTextWidth(facts) + 0.1 * facts.length : 0
+    const w = Math.max(tagW, factsW)
+    const totalH = tagH + (facts ? 3.2 * k : 0)
+
+    // Past either end of the bar reads best; failing that, alongside it.
+    const endOffset = Math.abs(ux) * (w / 2) + Math.abs(uy) * (totalH / 2) + half + 1.6
+    const sideOffset = half + Math.abs(nx) * (w / 2) + Math.abs(ny) * (totalH / 2) + 1.6
+    const spots: [number, number][] = [
+      [x1 - ux * endOffset, y1 - uy * endOffset],
+      [x2 + ux * endOffset, y2 + uy * endOffset],
+      ...[0.5, 0.25, 0.75, 0.12, 0.88].flatMap((f): [number, number][] => {
+        const mx = x1 + (x2 - x1) * f, my = y1 + (y2 - y1) * f
+        return [[mx - nx * sideOffset, my - ny * sideOffset], [mx + nx * sideOffset, my + ny * sideOffset]]
+      }),
+    ]
+    const spot = pickSpot(spots.map(([cx, cy]) => ({
+      cx, cy, box: { l: cx - w / 2 - 0.5, r: cx + w / 2 + 0.5, t: cy - totalH / 2 - 0.5, b: cy + totalH / 2 + 0.5 },
+    })), obstacles, frame)
+    obstacles.push(spot.box)
+
+    const tagY = spot.cy - totalH / 2 + (facts ? 3.2 * k : 0)
+    setFill(pdf, PAPER_WHITE)
+    setDraw(pdf, stroke, PEN.archLight)
+    pdf.rect(spot.cx - tagW / 2, tagY, tagW, tagH, 'FD')
+    drawText(pdf, name, spot.cx, tagY + tagH / 2 + h * 0.36, { size, bold: true, spacing: 0.35 * k, align: 'center', color: stroke })
+    if (facts) {
+      drawText(pdf, facts, spot.cx, tagY - 1.1 * k, { size: 4.2 * k, color: MUTED, align: 'center', spacing: 0.1, backdrop: true })
+    }
+  }
+
+  // ── Shape names ───────────────────────────────────────────────────────────
+  for (const el of content.elements) {
+    if (!el.label || (el.type !== 'rect' && el.type !== 'ellipse' && el.type !== 'polygon')) continue
+    const text = el.label.toUpperCase()
+    const w = textWidth(text, 0.4 * k)
+
+    let pts: number[]
+    if (el.type === 'rect') pts = rectCorners(el as RectElement, t)
+    else if (el.type === 'polygon') pts = polygonPoints(el as PolygonElement, t)
+    else {
+      const e = el as EllipseElement
+      const rx = e.radiusX * t.mmPerM * 0.7, ry = e.radiusY * t.mmPerM * 0.7
+      pts = [t.x(e.x) - rx, t.y(e.y) - ry, t.x(e.x) + rx, t.y(e.y) + ry]
+    }
+    if (pts.length < 4) continue
+    const xs = pts.filter((_, i) => i % 2 === 0), ys = pts.filter((_, i) => i % 2 === 1)
+    const l = Math.min(...xs), r = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys)
+    const mx = (l + r) / 2, my = (top + bottom) / 2
+    const padX = w / 2 + 2, padY = h / 2 + 1.8
+
+    // Centre if it is clear, otherwise tucked into a corner of the shape.
+    const spots: [number, number][] = [
+      [mx, my], [l + padX, top + padY], [r - padX, top + padY], [l + padX, bottom - padY],
+      [r - padX, bottom - padY], [mx, top + padY], [mx, bottom - padY],
+    ]
+    const spot = pickSpot(spots.map(([cx, cy]) => ({
+      cx, cy, box: { l: cx - w / 2 - 0.6, r: cx + w / 2 + 0.6, t: cy - h / 2 - 0.6, b: cy + h / 2 + 0.6 },
+    })), obstacles, frame)
+    obstacles.push(spot.box)
+    drawText(pdf, text, spot.cx, spot.cy + h * 0.36, {
+      size, color: [90, 99, 112], spacing: 0.4 * k, align: 'center', backdrop: true,
     })
   }
 }
@@ -716,9 +882,17 @@ function drawCable(pdf: jsPDF, ce: CableElement, t: Transform, opts: PlotOptions
   const label = [ce.autoLabel, ce.annotation, runLength != null ? `${runLength.toFixed(1)}m` : '']
     .filter(Boolean).join(' · ')
   if (!label) return
-  const mid = Math.floor(pts.length / 2)
-  drawText(pdf, label, t.x(pts[mid].x) + 0.9, t.y(pts[mid].y) - 0.9, {
-    size: 4, color, backdrop: true, spacing: 0.06,
+
+  // The label rides the middle of the longest leg, where there is room for it.
+  let best = 0, bestLen = -1
+  for (let i = 0; i < pts.length - 1; i++) {
+    const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y)
+    if (len > bestLen) { bestLen = len; best = i }
+  }
+  const mx = t.x((pts[best].x + pts[best + 1].x) / 2), my = t.y((pts[best].y + pts[best + 1].y) / 2)
+  const vertical = Math.abs(pts[best + 1].x - pts[best].x) < Math.abs(pts[best + 1].y - pts[best].y)
+  drawText(pdf, label, vertical ? mx + 1.2 : mx, vertical ? my + 0.5 : my - 1.1, {
+    size: 4.2, color, backdrop: true, spacing: 0.06, align: vertical ? 'left' : 'center',
   })
 }
 
@@ -777,46 +951,79 @@ function drawDistrosAndDevices(pdf: jsPDF, content: PlotContent, t: Transform) {
   }
 }
 
-function drawFixtures(pdf: jsPDF, fixtures: PlacedFixture[], project: Project, t: Transform, opts: PlotOptions) {
-  // Symbols are drawn near true size but never so small they stop reading.
-  const rMm = Math.max(1.6, Math.min(4.5, SYMBOL_RADIUS_M * t.mmPerM))
-
+function drawFixtureSymbols(
+  pdf: jsPDF, fixtures: PlacedFixture[], project: Project, layouts: Map<string, FixtureLayout>, opts: PlotOptions,
+) {
   for (const f of fixtures) {
+    const l = layouts.get(f.id)!
     const accent = opts.colorByLayer
-      ? hexToRgb(project.layers.find((l) => l.id === f.layerId)?.color ?? symbolColors(f.symbol).stroke)
+      ? hexToRgb(project.layers.find((layer) => layer.id === f.layerId)?.color ?? symbolColors(f.symbol).stroke)
       : undefined
-    drawFixtureSymbol(pdf, f.symbol, t.x(f.x), t.y(f.y), rMm, f.rotation, accent)
+    drawFixtureSymbol(pdf, f.symbol, l.cx, l.cy, l.rMm, f.rotation, accent)
+  }
+}
+
+export interface FixtureNotes {
+  channel: string
+  unit: string
+  address: string
+  colour: string
+  purpose: string
+  label: string
+}
+
+/**
+ * The label legend — where each fact about a light sits around its symbol:
+ *
+ *        (12)        channel, ringed, above
+ *     3   ◎          unit number, to the left
+ *       1.101        universe.address
+ *        L201        colour
+ *       FRONT        purpose
+ *
+ * Returns where each note landed so the notation key can point at them.
+ */
+function drawFixtureAnnotation(
+  pdf: jsPDF, l: FixtureLayout, notes: FixtureNotes, opts: PlotOptions, k: number,
+): Partial<Record<keyof FixtureNotes, { x: number; y: number }>> {
+  const at: Partial<Record<keyof FixtureNotes, { x: number; y: number }>> = {}
+
+  if (opts.showChannels && notes.channel) {
+    const size = 5.4 * k
+    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(size)
+    const h = 3.9 * k
+    const w = Math.max(h, pdf.getTextWidth(notes.channel) + 1.7 * k)
+    const cy = l.sym.t - 0.9 * k - h / 2
+    setFill(pdf, PAPER_WHITE)
+    setDraw(pdf, INK, PEN.archLight)
+    pdf.roundedRect(l.cx - w / 2, cy - h / 2, w, h, h / 2, h / 2, 'FD')
+    drawText(pdf, notes.channel, l.cx, cy + size * PT * 0.36, { size, bold: true, align: 'center' })
+    at.channel = { x: l.cx + w / 2, y: cy }
   }
 
-  // Annotation passes run after every symbol so nothing overpaints a label.
-  for (const f of fixtures) {
-    const cx = t.x(f.x), cy = t.y(f.y)
-
-    // Channel number in a boxed tag above the symbol, Vectorworks-style.
-    if (opts.showChannels && f.channel > 0) {
-      const text = String(f.channel)
-      pdf.setFont('helvetica', 'bold'); pdf.setFontSize(5)
-      const w = Math.max(3.4, pdf.getTextWidth(text) + 2)
-      const y = cy - rMm - 4.4
-      setFill(pdf, PAPER_WHITE)
-      setDraw(pdf, INK, PEN.hair)
-      pdf.rect(cx - w / 2, y, w, 3.4, 'FD')
-      drawText(pdf, text, cx, y + 2.5, { size: 5, bold: true, align: 'center' })
-    }
-
-    let below = cy + rMm + 2.2
-    if (opts.showAddresses) {
-      drawText(pdf, `${f.universe}.${String(f.address).padStart(3, '0')}`, cx, below, {
-        size: 4, color: MUTED, align: 'center', backdrop: true,
-      })
-      below += 2
-    }
-    if (opts.showFixtureLabels && f.label) {
-      drawText(pdf, f.label, cx, below, {
-        size: 4, color: [70, 78, 92], align: 'center', backdrop: true,
-      })
-    }
+  if (opts.showUnitNumbers && notes.unit) {
+    const size = 4.6 * k
+    const x = l.sym.l - 0.9 * k
+    drawText(pdf, notes.unit, x, l.cy + size * PT * 0.36, { size, bold: true, align: 'right', color: [70, 78, 92], backdrop: true })
+    pdf.setFont('helvetica', 'bold'); pdf.setFontSize(size)
+    at.unit = { x: x - pdf.getTextWidth(notes.unit), y: l.cy }
   }
+
+  const pitch = 2.15 * k
+  let y = l.sym.b + 2.3 * k
+  const row = (key: keyof FixtureNotes, text: string, style: TextStyle) => {
+    if (!text) return
+    const size = style.size ?? 4.4 * k
+    drawText(pdf, text, l.cx, y, { align: 'center', backdrop: true, ...style, size })
+    pdf.setFont('helvetica', style.bold ? 'bold' : 'normal'); pdf.setFontSize(size)
+    at[key] = { x: l.cx + pdf.getTextWidth(text) / 2, y: y - size * PT * 0.36 }
+    y += pitch
+  }
+  if (opts.showAddresses) row('address', notes.address, { color: INK })
+  if (opts.showColours) row('colour', notes.colour, { bold: true, color: INK })
+  if (opts.showPurposes) row('purpose', notes.purpose.toUpperCase(), { color: MUTED, size: 4.1 * k, spacing: 0.08 })
+  if (opts.showFixtureLabels) row('label', notes.label, { color: [70, 78, 92], italic: true, size: 4.1 * k })
+  return at
 }
 
 // ── Key column ────────────────────────────────────────────────────────────────
@@ -830,71 +1037,91 @@ function tableHeading(pdf: jsPDF, text: string, x: number, y: number, w: number)
 }
 
 /**
- * Draws the key column: instrument summary, cable key, north arrow and scale
- * bar — the block a crew actually reads before touching the drawing.
+ * Draws the key: symbol key, notation key, cable key, position summary, rig
+ * totals and general notes — the block a crew reads before touching the
+ * drawing. Sections that will not fit are left off whole rather than cut short.
  */
-export function drawLegend(
+export function drawKey(
   pdf: jsPDF,
   frame: Rect,
+  project: Project,
   content: PlotContent,
   result: PlotRenderResult,
-  paper: PaperSize,
+  opts: PlotOptions,
 ) {
   const { x, w } = frame
-  const bottomReserve = 30 // north arrow + scale bar
-  const limit = frame.y + frame.h - bottomReserve
+  const limit = frame.y + frame.h
   let y = frame.y + 4
+  const fits = (need: number) => y + need <= limit
 
-  // ── Instrument summary ──────────────────────────────────────────────────
-  if (result.legendItems.length > 0) {
-    y = tableHeading(pdf, 'Instrument summary', x, y, w)
-
-    const qtyX = x + w - 16
-    const wattX = x + w
-    drawCaption(pdf, 'Fixture', x + 10, y, { size: 4 })
-    drawCaption(pdf, 'Qty', qtyX, y, { size: 4, align: 'right' })
-    drawCaption(pdf, 'Watts', wattX, y, { size: 4, align: 'right' })
-    y += 1.6
-    setDraw(pdf, HAIRLINE, PEN.hair)
-    pdf.line(x, y, x + w, y)
-    y += 4.2
-
+  // ── Symbol key ──────────────────────────────────────────────────────────
+  if (result.legendItems.length > 0 && fits(16)) {
+    y = tableHeading(pdf, 'Symbol key', x, y, w)
+    const rowH = 7
     let shown = 0
     for (const item of result.legendItems) {
-      if (y > limit - 6) break
-      drawFixtureSymbol(pdf, item.symbol, x + 3.4, y - 1, 2.1, 0)
-      drawText(pdf, item.label, x + 10, y, { size: 4.8, maxW: w - 28 })
-      drawText(pdf, String(item.count), qtyX, y, { size: 4.8, bold: true, align: 'right' })
-      drawText(pdf, formatWatts(item.watts), wattX, y, { size: 4.4, color: MUTED, align: 'right' })
-      y += 1.4
-      setDraw(pdf, [232, 236, 242], PEN.hair)
+      if (!fits(rowH + 9)) break
+      // Fit the whole symbol, beam and all, into its cell.
+      const b = symbolBox(item.symbol, 0)
+      const r = Math.min(2.3, 8 / (b.maxX - b.minX), 5.4 / (b.maxY - b.minY))
+      drawFixtureSymbol(pdf, item.symbol, x + 4.5 - ((b.minX + b.maxX) / 2) * r, y + 1.2 - ((b.minY + b.maxY) / 2) * r, r, 0)
+      drawText(pdf, item.label, x + 11, y, { size: 5, bold: true, maxW: w - 21 })
+      drawText(pdf, `${formatWatts(item.watts / item.count)}  ·  ${(item.weight / item.count).toFixed(1)} kg`, x + 11, y + 2.7, {
+        size: 4, color: MUTED,
+      })
+      drawText(pdf, String(item.count), x + w, y + 1.2, { size: 6.4, bold: true, align: 'right' })
+      y += rowH - 2.6
+      setDraw(pdf, [226, 231, 238], PEN.hair)
       pdf.line(x, y, x + w, y)
-      y += 4.8
+      y += 3.6
       shown++
     }
-
     const hidden = result.legendItems.length - shown
     if (hidden > 0) {
-      drawText(pdf, `+ ${hidden} more type${hidden !== 1 ? 's' : ''}`, x, y, { size: 4.2, color: MUTED })
+      drawText(pdf, `+ ${hidden} more type${hidden !== 1 ? 's' : ''} — see the equipment list`, x, y, { size: 4.2, color: MUTED })
       y += 4
     }
-
-    // Totals
-    setDraw(pdf, INK, PEN.frame)
-    pdf.line(x, y - 3.2, x + w, y - 3.2)
-    drawCaption(pdf, 'Total', x, y, { size: 4.4, color: INK })
-    drawText(pdf, String(result.totals.count), qtyX, y, { size: 4.8, bold: true, align: 'right' })
-    drawText(pdf, `${(result.totals.watts / 1000).toFixed(1)} kW`, wattX, y, { size: 4.4, bold: true, align: 'right' })
     y += 3
-    drawText(pdf, `${result.totals.weight.toFixed(0)} kg total`, wattX, y, { size: 4, color: MUTED, align: 'right' })
-    y += 6
+  }
+
+  // ── Notation key ────────────────────────────────────────────────────────
+  const notes: FixtureNotes = { channel: '12', unit: '3', address: '1.101', colour: 'L201', purpose: 'Front', label: 'Label' }
+  const noteRows = [opts.showAddresses, opts.showColours, opts.showPurposes, opts.showFixtureLabels].filter(Boolean).length
+  const anyNotation = opts.showChannels || opts.showUnitNumbers || noteRows > 0
+  const notationH = 5 + 6 + 7 + noteRows * 2.2 + 4
+  if (anyNotation && result.legendItems.length > 0 && fits(notationH)) {
+    y = tableHeading(pdf, 'Notation', x, y, w)
+    const rMm = 2.6
+    const cx = x + 19, cy = y + 6.5
+    const b = symbolBox('wash', 0)
+    const layout: FixtureLayout = { cx, cy, rMm, sym: { l: cx + b.minX * rMm, t: cy + b.minY * rMm, r: cx + b.maxX * rMm, b: cy + b.maxY * rMm } }
+    drawFixtureSymbol(pdf, 'wash', cx, cy, rMm, 0)
+    const at = drawFixtureAnnotation(pdf, layout, notes, opts, 1)
+
+    const captions: [keyof FixtureNotes, string][] = [
+      ['channel', 'Channel'], ['address', 'Universe . address'], ['colour', 'Colour'],
+      ['purpose', 'Purpose'], ['label', 'Label'],
+    ]
+    const capX = x + 31
+    setDraw(pdf, HAIRLINE, PEN.hair)
+    for (const [key, caption] of captions) {
+      const p = at[key]
+      if (!p) continue
+      pdf.line(p.x + 0.8, p.y, capX - 1, p.y)
+      drawCaption(pdf, caption, capX, p.y + 0.6, { size: 3.9 })
+    }
+    if (at.unit) {
+      pdf.line(x + 9.5, at.unit.y, at.unit.x - 0.8, at.unit.y)
+      drawCaption(pdf, 'Unit', x + 9, at.unit.y + 0.6, { size: 3.9, align: 'right' })
+    }
+    y += notationH - 5
   }
 
   // ── Cable key ───────────────────────────────────────────────────────────
-  if (result.cableTypes.length > 0 && y < limit - 10) {
+  if (result.cableTypes.length > 0 && fits(11)) {
     y = tableHeading(pdf, 'Cable key', x, y, w)
     for (const type of result.cableTypes) {
-      if (y > limit - 3) break
+      if (!fits(4.4)) break
       setDraw(pdf, hexToRgb(CABLE_COLORS[type] ?? '#9ca3af'), 0.45)
       pdf.setLineDashPattern([1.4, 0.9], 0)
       pdf.line(x, y - 1, x + 7, y - 1)
@@ -902,51 +1129,98 @@ export function drawLegend(
       drawText(pdf, CABLE_LABELS[type] ?? type, x + 8.5, y, { size: 4.6, maxW: w - 9 })
       y += 4.4
     }
+    y += 3
   }
 
-  // ── Sheet data ──────────────────────────────────────────────────────────
-  if (y < limit - 24) {
-    y = tableHeading(pdf, 'Sheet data', x, y + 2, w)
-    const universes = [...new Set(content.fixtures.map((f) => f.universe))].sort((a, b) => a - b)
-    const unpatched = content.fixtures.filter((f) => !f.circuitId).length
-    const facts: [string, string][] = [
-      ['Fixtures', String(result.totals.count)],
-      ['Connected load', `${(result.totals.watts / 1000).toFixed(1)} kW`],
-      ['Hanging weight', `${result.totals.weight.toFixed(0)} kg`],
-      ['Universes', universes.length ? universes.map((u) => `U${u}`).join(', ') : '—'],
-      ['Distros', String(content.distros.length)],
-      ['Without a circuit', String(unpatched)],
-    ]
-    for (const [caption, value] of facts) {
-      if (y > limit - 4) break
-      drawCaption(pdf, caption, x, y, { size: 4.2 })
-      drawText(pdf, value, x + w, y, { size: 4.8, bold: true, align: 'right', maxW: w * 0.55 })
+  // ── Positions ───────────────────────────────────────────────────────────
+  const shownIds = new Set(content.fixtures.map((f) => f.id))
+  const rows = result.positions.positions
+    .map((p) => ({ ...p, fixtures: p.fixtures.filter((f) => shownIds.has(f.id)) }))
+    .filter((p) => p.fixtures.length > 0)
+  const loose = result.positions.loose.filter((f) => shownIds.has(f.id))
+  if (rows.length > 0 && fits(13 + Math.min(rows.length, 3) * 4.2)) {
+    y = tableHeading(pdf, 'Positions', x, y, w)
+    const cTrim = x + w - 30, cUnits = x + w - 15, cKg = x + w
+    drawCaption(pdf, 'Position', x, y, { size: 3.9 })
+    drawCaption(pdf, 'Trim', cTrim, y, { size: 3.9, align: 'right' })
+    drawCaption(pdf, 'Units', cUnits, y, { size: 3.9, align: 'right' })
+    drawCaption(pdf, 'Load', cKg, y, { size: 3.9, align: 'right' })
+    y += 4
+    const line = (name: string, trim: string, units: number, kg: number, muted = false) => {
+      drawText(pdf, name, x, y, { size: 4.8, bold: !muted, color: muted ? MUTED : INK, maxW: w - 46 })
+      drawText(pdf, trim, cTrim, y, { size: 4.6, align: 'right', color: MUTED })
+      drawText(pdf, String(units), cUnits, y, { size: 4.6, align: 'right' })
+      drawText(pdf, `${kg.toFixed(0)} kg`, cKg, y, { size: 4.6, align: 'right' })
       y += 4.2
     }
-    // The not-to-scale stamp already says this on a freeform sheet.
-    if (!result.scale.notToScale) {
-      y += 1.5
-      drawText(pdf, 'Do not scale from this drawing —', x, y, { size: 3.9, color: MUTED })
-      drawText(pdf, 'verify all dimensions on site.', x, y + 3, { size: 3.9, color: MUTED })
+    let cut = 0
+    for (const p of rows) {
+      if (!fits(4.2 + (loose.length ? 4.2 : 0))) { cut++; continue }
+      line(p.name, p.trim != null ? `${p.trim.toFixed(2)} m` : '—', p.fixtures.length, p.fixtures.reduce((s, f) => s + f.weight, 0))
     }
+    if (loose.length > 0 && fits(4.2)) line('Not on a position', '', loose.length, loose.reduce((s, f) => s + f.weight, 0), true)
+    if (cut > 0 && fits(4)) { drawText(pdf, `+ ${cut} more`, x, y, { size: 4.2, color: MUTED }); y += 4 }
+    y += 3
   }
 
-  // ── North arrow + scale bar ─────────────────────────────────────────────
-  const footY = frame.y + frame.h - 24
-  setDraw(pdf, HAIRLINE, PEN.hair)
-  pdf.line(x, footY - 3, x + w, footY - 3)
+  // ── Rig totals ──────────────────────────────────────────────────────────
+  if (result.totals.count > 0 && fits(19)) {
+    y = tableHeading(pdf, 'Rig totals', x, y, w)
+    const universes = [...new Set(content.fixtures.map((f) => f.universe))].sort((a, b) => a - b)
+    const facts: [string, string][] = [
+      ['Fixtures', String(result.totals.count)],
+      ['Connected load', formatWatts(result.totals.watts)],
+      ['Total weight', `${result.totals.weight.toFixed(0)} kg`],
+      ['Universes', universes.length ? universes.join(', ') : '—'],
+    ]
+    const half = w / 2
+    facts.forEach(([caption, value], i) => {
+      const fx = x + (i % 2) * half
+      const fy = y + Math.floor(i / 2) * 7.4
+      drawCaption(pdf, caption, fx, fy, { size: 3.9 })
+      drawText(pdf, value, fx, fy + 3.5, { size: 6.2, bold: true, maxW: half - 2 })
+    })
+    y += 7.4 * 2 + 2.5
+  }
+
+  // ── General notes ───────────────────────────────────────────────────────
+  const general = [
+    ...(project.info.notes ?? '').split('\n').map((s) => s.trim()).filter(Boolean),
+    ...(result.scale.notToScale
+      ? ['Schematic — not to scale. Do not measure from this drawing.']
+      : ['Do not scale from this drawing. Verify all dimensions on site.']),
+  ]
+  if (fits(12)) {
+    y = tableHeading(pdf, 'Notes', x, y, w)
+    pdf.setFont('helvetica', 'normal'); pdf.setFontSize(4.4)
+    let n = 0
+    for (const note of general) {
+      const lines = pdf.splitTextToSize(note, w - 5) as string[]
+      if (!fits(lines.length * 2.3 + 1)) break
+      n++
+      drawText(pdf, `${n}.`, x, y, { size: 4.4, bold: true })
+      for (const text of lines) {
+        drawText(pdf, text, x + 4.5, y, { size: 4.4, color: [70, 78, 92] })
+        y += 2.3
+      }
+      y += 1.1
+    }
+  }
+}
+
+/** North arrow with a scale bar beside it, or the not-to-scale stamp. */
+export function drawScaleBlock(pdf: jsPDF, frame: Rect, result: PlotRenderResult, paper: PaperSize) {
+  const { x, y, w } = frame
   if (result.scale.notToScale) {
     setDraw(pdf, INK, PEN.archLight)
     setFill(pdf, PAPER_WHITE)
-    pdf.rect(x, footY + 1, Math.min(w, 42), 8, 'FD')
-    drawText(pdf, 'NOT TO SCALE', x + Math.min(w, 42) / 2, footY + 6.2, {
-      size: 6, bold: true, spacing: 0.5, align: 'center',
-    })
-    drawText(pdf, 'Schematic — do not measure', x, footY + 13, { size: 4, color: MUTED })
-  } else {
-    drawNorthArrow(pdf, x + 4.5, footY + 6)
-    drawScaleBar(pdf, x + 14, footY + 2, w - 14, result, paper)
+    pdf.rect(x, y + 3, Math.min(w, 44), 8, 'FD')
+    drawText(pdf, 'NOT TO SCALE', x + Math.min(w, 44) / 2, y + 8.2, { size: 6, bold: true, spacing: 0.5, align: 'center' })
+    drawText(pdf, 'Schematic — do not measure', x, y + 15, { size: 4, color: MUTED })
+    return
   }
+  drawNorthArrow(pdf, x + 4.5, y + 7)
+  drawScaleBar(pdf, x + 14, y + 3, w - 14, result, paper)
 }
 
 /** Plan north indicator. */
@@ -990,5 +1264,6 @@ export function drawScaleBar(pdf: jsPDF, x: number, y: number, maxW: number, res
   pdf.line(x + barW, barY - 0.8, x + barW, barY + barH + 0.8)
 
   drawText(pdf, '0', x, barY + barH + 3.4, { size: 4, color: MUTED })
+  drawText(pdf, `${metres / 2}`, x + barW / 2, barY + barH + 3.4, { size: 4, color: MUTED, align: 'center' })
   drawText(pdf, `${metres} m`, x + barW, barY + barH + 3.4, { size: 4, color: MUTED, align: 'right' })
 }
