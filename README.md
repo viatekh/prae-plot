@@ -55,8 +55,18 @@ different way: the **instrument schedule** (by position and unit, the order it
 is hung), the **channel hookup** (by channel, the order the desk sees it) and
 the **patch sheet** (by universe and address, with free addresses and clashes
 flagged). Plus the equipment list, cable schedule, power report, and network
-and DMX topology. All viewable in the app and exportable as PDF. The patch also
-exports as a CSV, one fixture per row, for a console or visualiser import.
+and DMX topology. All viewable in the app and exportable as PDF.
+
+The patch also exports as two plain files, one fixture per row, each headed the
+way its importer names its own fields so nothing has to be mapped by hand: a
+**CSV** for Capture's *Import Fixture Data* (`Fixture`, `Channel`, `Patch` as
+`universe.address`, `Unit`, `Circuit` …, with the patch also split out and as a
+running number for anything else), and a tab-separated **Eos patch** `.txt`
+under Lightwright headings (`Channel`, `Dimmer` as `universe/address`,
+`Device Type`, `Position`, `Unit#`, `Purpose`, `Color`, `Circuit Name`) for
+*File › Import › Lightwright* on an Eos family desk. The Capture layout follows
+its reference manual; the Eos one follows ETC's support article and has not
+been tried on a console.
 
 ## The plot PDF
 

@@ -115,27 +115,46 @@ export function patchByUniverse(project: Project): UniversePatch[] {
   })
 }
 
-// ── Patch CSV ─────────────────────────────────────────────────────────────────
-// A console or a visualiser will not read a PDF. This is the hookup as plain
-// columns, one fixture per row in channel order, for an importer that lets you
-// map columns to its own fields.
+// ── Patch files ───────────────────────────────────────────────────────────────
+// A console or a visualiser will not read a PDF. These are the hookup as plain
+// columns, one fixture per row in channel order. Both importers go by the
+// header row, so the columns are named the way each one names its own fields
+// and need no mapping by hand; the order does not matter to either.
 
-const CSV_COLUMNS: [string, (r: ScheduleRow) => string | number][] = [
+type Column = [string, (r: ScheduleRow) => string | number]
+
+// Capture ("Import Fixture Data"): comma-separated, matched on Capture's own
+// property names, patch written Universe.Address. The columns after Note are
+// not Capture's — they are there for spreadsheets and for importers that want
+// the patch split up or as one running number, and can be mapped or ignored.
+const CSV_COLUMNS: Column[] = [
+  ['Fixture', (r) => r.type],
   ['Channel', (r) => r.channel || ''],
-  ['Universe', (r) => r.universe],
-  ['Address', (r) => r.address],
-  // Some importers want one running number rather than universe and address.
-  ['Absolute Address', (r) => (r.universe - 1) * 512 + r.address],
-  ['Patch', (r) => `${r.universe}/${r.address}`],
-  ['Fixture Type', (r) => r.type],
+  ['Patch', (r) => `${r.universe}.${r.address}`],
+  ['Unit', (r) => r.unit || ''],
+  ['Circuit', (r) => (r.circuit === '—' ? '' : r.circuit)],
+  ['Purpose', (r) => r.purpose],
+  ['Note', (r) => r.notes],
   ['Mode', (r) => r.mode],
   ['Footprint', (r) => r.footprint],
   ['Position', (r) => r.position],
-  ['Unit', (r) => r.unit || ''],
-  ['Purpose', (r) => r.purpose],
   ['Colour', (r) => r.colour],
-  ['Circuit', (r) => (r.circuit === '—' ? '' : r.circuit)],
-  ['Notes', (r) => r.notes],
+  ['Universe', (r) => r.universe],
+  ['Address', (r) => r.address],
+  ['Absolute Address', (r) => (r.universe - 1) * 512 + r.address],
+]
+
+// Eos ("Import > Lightwright"): a tab-separated text file under Lightwright's
+// headings, the address in one Dimmer column as universe/address.
+const EOS_COLUMNS: Column[] = [
+  ['Channel', (r) => r.channel || ''],
+  ['Dimmer', (r) => `${r.universe}/${r.address}`],
+  ['Device Type', (r) => r.type],
+  ['Position', (r) => r.position],
+  ['Unit#', (r) => r.unit || ''],
+  ['Purpose', (r) => r.purpose],
+  ['Color', (r) => r.colour],
+  ['Circuit Name', (r) => (r.circuit === '—' ? '' : r.circuit)],
 ]
 
 function csvCell(value: string | number): string {
@@ -143,9 +162,25 @@ function csvCell(value: string | number): string {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-export function buildPatchCSV(project: Project): string {
-  const lines = [CSV_COLUMNS.map(([name]) => name).join(',')]
-  for (const row of channelHookup(project)) lines.push(CSV_COLUMNS.map(([, pick]) => csvCell(pick(row))).join(','))
-  // CRLF line ends and a trailing one: what spreadsheet and console importers expect.
+/** A tab-separated file has no quoting, so a cell cannot hold a tab or a line break. */
+function tsvCell(value: string | number): string {
+  return String(value).replace(/[\t\r\n]+/g, ' ')
+}
+
+function table(project: Project, columns: Column[], cell: (v: string | number) => string, divider: string): string {
+  const lines = [columns.map(([name]) => name).join(divider)]
+  for (const row of channelHookup(project)) lines.push(columns.map(([, pick]) => cell(pick(row))).join(divider))
+  // CRLF line ends and a trailing one: Eos refuses anything else, and
+  // spreadsheets and Capture are happy with it.
   return lines.join('\r\n') + '\r\n'
+}
+
+/** Comma-separated patch, headed for Capture's fixture data import. */
+export function buildPatchCSV(project: Project): string {
+  return table(project, CSV_COLUMNS, csvCell, ',')
+}
+
+/** Tab-separated patch, headed for the Eos family's Lightwright import. */
+export function buildEosPatchText(project: Project): string {
+  return table(project, EOS_COLUMNS, tsvCell, '\t')
 }

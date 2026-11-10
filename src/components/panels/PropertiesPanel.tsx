@@ -425,7 +425,11 @@ function FixtureProperties({ fixture }: { fixture: PlacedFixture }) {
           <Input type='number' value={fixture.universe} onChange={(v) => upd({ universe: parseInt(v) || 1 })} />
         </Field>
         <Field label='Address'>
-          <Input type='number' value={fixture.address} onChange={(v) => upd({ address: parseInt(v) || 1 })} />
+          {/* A running number past 512 carries into the universe: 613 is 2.101. */}
+          <Input type='number' value={fixture.address} onChange={(v) => {
+            const n = Math.max(1, parseInt(v) || 1)
+            upd(n > 512 ? { universe: Math.floor((n - 1) / 512) + 1, address: ((n - 1) % 512) + 1 } : { address: n })
+          }} />
         </Field>
       </div>
 

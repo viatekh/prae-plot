@@ -10,7 +10,7 @@ import { DEFAULT_PLOT_OPTIONS, PAPER_LABELS, STANDARD_SCALES } from '../../lib/p
 import type { PlotOptions, PaperSize, Orientation } from '../../lib/plotVector'
 import { useProjectStore } from '../../store/projectStore'
 import { cn, downloadText } from '../../lib/utils'
-import { buildPatchCSV } from '../../lib/schedules'
+import { buildPatchCSV, buildEosPatchText } from '../../lib/schedules'
 
 export type ExportTab = 'plot' | 'instrument' | 'hookup' | 'patch' | 'equipment' | 'cable' | 'power' | 'groups'
 type Tab = ExportTab
@@ -157,9 +157,10 @@ export default function ExportModal({ project, initialTab, onClose }: Props) {
     }
   }
 
-  const handleCsv = () => {
+  const handlePatchFile = (target: 'csv' | 'eos') => {
     const name = (project.info.name || 'Project').replace(/[^\w\-. ]+/g, '').trim().replace(/\s+/g, '_') || 'Project'
-    downloadText(buildPatchCSV(project), `${name}_Patch.csv`, 'text/csv')
+    if (target === 'eos') downloadText(buildEosPatchText(project), `${name}_Patch_Eos.txt`, 'text/plain')
+    else downloadText(buildPatchCSV(project), `${name}_Patch.csv`, 'text/csv')
   }
 
   const tabs: { id: Tab; label: string; icon: React.ReactNode }[] = [
@@ -344,15 +345,22 @@ export default function ExportModal({ project, initialTab, onClose }: Props) {
                 <ExternalLink size={13} /> Open
               </a>
             )}
-            {(tab === 'patch' || tab === 'hookup') && project.fixtures.length > 0 && (
+            {(tab === 'patch' || tab === 'hookup') && project.fixtures.length > 0 && (<>
               <button
-                onClick={handleCsv}
-                title='One fixture per row in channel order — for a console or visualiser patch import'
+                onClick={() => handlePatchFile('csv')}
+                title='Comma-separated, one fixture per row, under the column names Capture uses — File › Import Fixture Data. Also opens in any spreadsheet.'
                 className='flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors'
               >
                 <FileText size={13} /> Patch CSV
               </button>
-            )}
+              <button
+                onClick={() => handlePatchFile('eos')}
+                title='Tab-separated text under Lightwright headings — on an Eos family desk: File › Import › Lightwright'
+                className='flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors'
+              >
+                <FileText size={13} /> Eos patch
+              </button>
+            </>)}
             <button onClick={onClose} className='px-4 py-2 text-sm text-gray-600 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors'>
               Cancel
             </button>

@@ -224,6 +224,7 @@ interface ElementNodeProps {
 }
 
 function StageElementNode({ el, selected, scale, locked, vo, freeform, onClick, onDragStart, onDragEnd }: ElementNodeProps) {
+  // Shapes whose outline is exempt from scaling (strokeScaleEnabled off) take sw * scale: screen pixels.
   const sw = (selected ? 2 : 1) / scale
   const stroke = selected ? '#f97316' : (el.stroke || '#374151')
   const draggable = !el.locked && !locked
@@ -258,7 +259,7 @@ function StageElementNode({ el, selected, scale, locked, vo, freeform, onClick, 
       <Rect
         {...common}
         x={re.x * BASE_PX} y={re.y * BASE_PX} width={w} height={h} rotation={re.rotation}
-        fill={resolvedFill(re.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
+        strokeScaleEnabled={false} fill={resolvedFill(re.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw * scale}
         onTransformEnd={(e) => {
           const node = e.target
           update({
@@ -281,7 +282,7 @@ function StageElementNode({ el, selected, scale, locked, vo, freeform, onClick, 
         {...common}
         x={ee.x * BASE_PX} y={ee.y * BASE_PX} rotation={ee.rotation}
         radiusX={ee.radiusX * BASE_PX} radiusY={ee.radiusY * BASE_PX}
-        fill={resolvedFill(ee.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
+        strokeScaleEnabled={false} fill={resolvedFill(ee.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw * scale}
         onTransformEnd={(e) => {
           const node = e.target
           update({
@@ -310,7 +311,7 @@ function StageElementNode({ el, selected, scale, locked, vo, freeform, onClick, 
         {...common}
         x={pe.x * BASE_PX} y={pe.y * BASE_PX} rotation={pe.rotation}
         points={pts} closed
-        fill={resolvedFill(pe.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw}
+        strokeScaleEnabled={false} fill={resolvedFill(pe.fill, '#d1d5db')} stroke={stroke} strokeWidth={sw * scale}
         onTransformEnd={(e) => {
           const node = e.target
           const sx = node.scaleX(), sy = node.scaleY()
@@ -1464,6 +1465,10 @@ export default function PlotCanvas() {
           <Transformer
             ref={trRef}
             rotateEnabled={true}
+            // Measure the geometry, not the outline: with the stroke counted in,
+            // the corner held still during a resize is the stroke's corner, and
+            // the shape's own corner drifts by half a stroke times the stretch.
+            ignoreStroke
             borderStroke='#f97316'
             borderStrokeWidth={1.5 / view.scale}
             anchorFill='white'
